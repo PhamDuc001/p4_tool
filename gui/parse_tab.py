@@ -1,14 +1,18 @@
 """
 Parse tab implementation
-Handles the parse mode UI and functionality for workspace parsing and library size calculation
+Handles the parse mode UI for workspace parsing and library size calculation
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-import subprocess
-import re
-from processes.parse_process import parse_multiple_workspaces, validate_workspace_exists
+from processes.parse_process import (
+    parse_multiple_workspaces, 
+    validate_workspace_exists,
+    refresh_adb_devices,
+    connect_to_device,
+    calculate_library_sizes
+)
 
 
 class ExportDialog:
@@ -123,7 +127,7 @@ class ExportDialog:
 
 
 class ParseTab:
-    """Parse tab component"""
+    """Parse tab component - UI only"""
 
     def __init__(self, parent, gui_utils):
         self.parent = parent
@@ -341,7 +345,7 @@ class ParseTab:
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        # Table control buttons - Enhanced with Export button
+        # Table control buttons
         table_buttons_frame = ttk.Frame(library_frame)
         table_buttons_frame.pack(fill="x", pady=5)
 
@@ -354,14 +358,13 @@ class ParseTab:
             table_buttons_frame, text="Clear Results", command=self.on_clear_results
         ).pack(side="left", padx=5)
 
-        # NEW: Export button (positioned between existing buttons for better balance)
+        # Export button
         ttk.Button(
             table_buttons_frame, text="Export", command=self.on_export_library_list
         ).pack(side="left", padx=5)
 
-        # Bind double-click to delete
+        # Bind events
         self.results_tree.bind("<Double-1>", lambda e: self.on_delete_library())
-        # Bind Delete key
         self.results_tree.bind("<Delete>", lambda e: self.on_delete_library())
 
     def show(self):
@@ -416,7 +419,7 @@ class ParseTab:
         self.log_callback("[INFO] Parse fields cleared.")
 
     # ============================================================================
-    # NEW: EXPORT FUNCTIONALITY
+    # EXPORT FUNCTIONALITY
     # ============================================================================
 
     def on_export_library_list(self):
@@ -447,38 +450,16 @@ class ParseTab:
             messagebox.showerror("Export Error", f"Failed to export library list: {str(e)}")
 
     # ============================================================================
-    # LIBRARY SIZE CALCULATOR METHODS
+    # LIBRARY SIZE CALCULATOR UI HANDLERS
     # ============================================================================
 
     def on_refresh_devices(self):
-        """Refresh ADB devices list"""
+        """Handle refresh devices button click"""
         try:
             self.log_callback("[ADB] Refreshing device list...")
-            result = subprocess.run(
-                ["adb", "devices"], 
-                capture_output=True, 
-                text=True, 
-                timeout=10
-            )
+            devices = refresh_adb_devices(self.log_callback)
             
-            if result.returncode != 0:
-                self.log_callback("[ERROR] Failed to run adb devices command")
-                messagebox.showerror("ADB Error", "Failed to run 'adb devices'. Make sure ADB is in your PATH.")
-                return
-
-            # Parse devices output
-            lines = result.stdout.strip().split('\n')
-            devices = []
-            
-            for line in lines[1:]:  # Skip first line "List of devices attached"
-                if line.strip() and '\t' in line:
-                    device_id, status = line.split('\t')
-                    if status.strip() == 'device':
-                        devices.append(device_id.strip())
-
             self.connected_devices = devices
-            
-            # Update combobox
             self.device_combo['values'] = devices
             
             if devices:
@@ -489,18 +470,12 @@ class ParseTab:
                 self.log_callback("[ADB] No devices found")
                 messagebox.showinfo("No Devices", "No ADB devices found. Please connect a device and try again.")
 
-        except subprocess.TimeoutExpired:
-            self.log_callback("[ERROR] ADB devices command timed out")
-            messagebox.showerror("Timeout", "ADB command timed out. Please check your ADB connection.")
-        except FileNotFoundError:
-            self.log_callback("[ERROR] ADB not found in PATH")
-            messagebox.showerror("ADB Not Found", "ADB command not found. Please install Android SDK and add ADB to your PATH.")
         except Exception as e:
             self.log_callback(f"[ERROR] Error refreshing devices: {str(e)}")
             messagebox.showerror("Error", f"Error refreshing devices: {str(e)}")
 
     def on_connect_device(self):
-        """Connect to selected device"""
+        """Handle connect device button click"""
         selected = self.device_var.get().strip()
         if not selected:
             messagebox.showwarning("No Device Selected", "Please select a device to connect.")
@@ -509,33 +484,23 @@ class ParseTab:
         try:
             self.log_callback(f"[ADB] Connecting to device: {selected}")
             
-            # Test connection by running a simple command
-            result = subprocess.run(
-                ["adb", "-s", selected, "shell", "echo", "test"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-
-            if result.returncode == 0:
+            success = connect_to_device(selected, self.log_callback)
+            
+            if success:
                 self.selected_device = selected
                 self.connection_status.set(f"Connected: {selected}")
                 self.connection_status.config(foreground="green")
                 self.calculate_button.configure(state="normal")
                 self.log_callback(f"[ADB] Successfully connected to {selected}")
             else:
-                self.log_callback(f"[ERROR] Failed to connect to {selected}: {result.stderr}")
                 messagebox.showerror("Connection Failed", f"Failed to connect to device: {selected}")
 
-        except subprocess.TimeoutExpired:
-            self.log_callback(f"[ERROR] Connection to {selected} timed out")
-            messagebox.showerror("Timeout", "Connection timed out. Please check device connection.")
         except Exception as e:
             self.log_callback(f"[ERROR] Error connecting to device: {str(e)}")
             messagebox.showerror("Error", f"Error connecting to device: {str(e)}")
 
     def on_calculate_sizes(self):
-        """Calculate library sizes"""
+        """Handle calculate sizes button click"""
         if not self.selected_device:
             messagebox.showwarning("No Device", "Please connect to a device first.")
             return
@@ -569,53 +534,13 @@ class ParseTab:
                 total_libraries = len(libraries)
                 self.gui_utils.update_status(f"Calculating sizes for {total_libraries} libraries...")
                 
-                results = {}
-                total_size = 0
-
-                for i, library in enumerate(libraries):
-                    try:
-                        self.log_callback(f"[CALC] Checking size of: {library}")
-                        
-                        # Run du command on device
-                        result = subprocess.run(
-                            ["adb", "-s", self.selected_device, "shell", "du", library],
-                            capture_output=True,
-                            text=True,
-                            timeout=10
-                        )
-
-                        if result.returncode == 0:
-                            # Parse du output (format: "size_in_kb    path")
-                            output = result.stdout.strip()
-                            if output:
-                                # Extract size (first column)
-                                size_kb = re.split(r'\s+', output)[0]
-                                try:
-                                    size_kb_int = int(size_kb)
-                                    size_bytes = size_kb_int * 1024
-                                    results[library] = size_bytes
-                                    total_size += size_bytes
-                                    self.log_callback(f"[OK] {library}: {size_kb} KB ({size_bytes} bytes)")
-                                except ValueError:
-                                    self.log_callback(f"[ERROR] Invalid size format for {library}: {size_kb}")
-                                    results[library] = 0
-                            else:
-                                self.log_callback(f"[ERROR] Empty output for {library}")
-                                results[library] = 0
-                        else:
-                            self.log_callback(f"[ERROR] Failed to get size for {library}: {result.stderr.strip()}")
-                            results[library] = 0
-
-                    except subprocess.TimeoutExpired:
-                        self.log_callback(f"[ERROR] Timeout checking {library}")
-                        results[library] = 0
-                    except Exception as e:
-                        self.log_callback(f"[ERROR] Error checking {library}: {str(e)}")
-                        results[library] = 0
-
-                    # Update progress
-                    progress = int(((i + 1) / total_libraries) * 100)
-                    self.gui_utils.root.after(0, lambda p=progress: self.calc_progress.configure(value=p))
+                # Use logic from parse_process
+                results = calculate_library_sizes(
+                    self.selected_device, 
+                    libraries, 
+                    self.log_callback,
+                    lambda progress: self.gui_utils.root.after(0, lambda: self.calc_progress.configure(value=progress))
+                )
 
                 # Update UI with results
                 self.gui_utils.root.after(0, lambda: self._update_results_table(results))
@@ -734,7 +659,7 @@ class ParseTab:
         self.calc_progress["value"] = 0
 
     # ============================================================================
-    # ORIGINAL PARSE WORKSPACE METHODS
+    # WORKSPACE PARSING UI HANDLERS
     # ============================================================================
 
     def on_parse_workspaces(self):
