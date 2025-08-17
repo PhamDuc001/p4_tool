@@ -7,6 +7,13 @@ import re
 from typing import List, Optional
 from config.p4_config import get_client_name
 
+# Export the function for use by other modules  
+__all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'create_changelist', 
+           'create_changelist_silent', 'map_client', 'map_client_two_paths', 
+           'map_single_depot', 'map_two_depots_silent', 'sync_file', 'sync_file_silent', 
+           'checkout_file', 'checkout_file_silent', 'is_workspace_like', 
+           'resolve_workspace_to_device_common_path', 'resolve_user_input_to_depot_path']
+
 def run_cmd(cmd, input_text=None):
     """Execute command and return output"""
     result = subprocess.run(cmd, input=input_text, capture_output=True, text=True, shell=True)
