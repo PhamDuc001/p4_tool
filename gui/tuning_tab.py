@@ -1,18 +1,19 @@
 """
-Tuning tab implementation
-Handles the tuning mode UI and functionality including property management
+Enhanced Tuning tab implementation with REL path support and property comparison
+Handles the tuning mode UI and functionality including property management for 3 paths
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 from config.p4_config import get_client_name, get_workspace_root
-from processes.tuning_process import load_properties_for_tuning, apply_tuning_changes
+from processes.tuning_process import load_properties_for_tuning_enhanced, apply_tuning_changes_enhanced
 from gui.property_dialog import PropertyDialog
+from gui.comparison_dialog import ComparisonDialog  # New dialog for property comparison
 
 
 class TuningTab:
-    """Tuning tab component"""
+    """Enhanced Tuning tab component with REL path support"""
 
     def __init__(self, parent, gui_utils):
         self.parent = parent
@@ -24,12 +25,13 @@ class TuningTab:
         # Tuning mode data
         self.loaded_properties = None
         self.original_properties = {}
+        self.comparison_data = None  # Store comparison data for 3 paths
         
         # Initialize components
         self.create_content()
 
     def create_content(self):
-        """Create content for tuning mode with Apply functionality"""
+        """Create content for tuning mode with REL path and enhanced comparison"""
         # Input fields frame
         input_frame = ttk.LabelFrame(
             self.frame, text="Configuration", padding=10
@@ -50,12 +52,19 @@ class TuningTab:
         self.flumen_entry = ttk.Entry(input_frame, width=70)
         self.flumen_entry.grid(column=1, row=1, padx=5, pady=2, sticky="ew")
 
+        # REL Path (NEW)
+        ttk.Label(input_frame, text="REL Depot Path:").grid(
+            column=0, row=2, sticky="w", pady=2
+        )
+        self.rel_entry = ttk.Entry(input_frame, width=70)
+        self.rel_entry.grid(column=1, row=2, padx=5, pady=2, sticky="ew")
+
         # Configure grid weights
         input_frame.columnconfigure(1, weight=1)
 
         # Control frame
         control_frame = ttk.Frame(input_frame)
-        control_frame.grid(column=1, row=2, pady=10, sticky="e")
+        control_frame.grid(column=1, row=3, pady=10, sticky="e")
 
         # Load Properties button
         self.load_properties_btn = ttk.Button(
@@ -63,10 +72,10 @@ class TuningTab:
         )
         self.load_properties_btn.pack(side="left", padx=(0, 10))
 
-        # Apply Tuning button - Enhanced with delete support
+        # Apply Tuning button - Enhanced with 3-path support
         self.apply_tuning_btn = ttk.Button(
             control_frame,
-            text="Apply Tuning",
+            text="Apply to All Paths",
             command=self.on_apply_tuning,
             state="disabled",
         )
@@ -78,7 +87,7 @@ class TuningTab:
         )
         self.progress.pack(side="left", padx=(0, 10))
 
-        # Properties table frame - Expanded height
+        # Properties table frame - Reduced height as requested
         table_frame = ttk.LabelFrame(
             self.frame, text="LMKD & Chimera Properties", padding=5
         )
@@ -99,15 +108,15 @@ class TuningTab:
         self.progress_callback = self.gui_utils.create_progress_callback(self.progress)
 
     def create_properties_table(self, parent):
-        """Create properties table with treeview - Enhanced with grid lines and wider table"""
+        """Create properties table with treeview - Reduced height for comparison table space"""
         # Table frame with scrollbars
         table_container = ttk.Frame(parent)
         table_container.pack(fill="both", expand=True)
 
-        # Create treeview with enhanced styling
+        # Create treeview with enhanced styling but reduced height
         columns = ("Category", "Property", "Value")
         self.properties_tree = ttk.Treeview(
-            table_container, columns=columns, show="tree headings", height=18
+            table_container, columns=columns, show="tree headings", height=12  # Reduced from 18
         )
 
         # Configure columns with wider widths
@@ -154,7 +163,7 @@ class TuningTab:
         buttons_frame = ttk.Frame(parent)
         buttons_frame.pack(fill="x", pady=5)
 
-        # Table control buttons - Removed Export Properties button
+        # Table control buttons
         ttk.Button(
             buttons_frame,
             text="Add LMKD Property",
@@ -185,9 +194,10 @@ class TuningTab:
 
     def clear_all(self):
         """Clear all input fields and data"""
-        # Clear tuning input fields
+        # Clear tuning input fields including REL
         self.beni_entry.delete(0, tk.END)
         self.flumen_entry.delete(0, tk.END)
+        self.rel_entry.delete(0, tk.END)  # NEW
 
         # Clear properties table
         for item in self.properties_tree.get_children():
@@ -202,6 +212,7 @@ class TuningTab:
         # IMPORTANT: Reset all cached data to force fresh load
         self.original_properties = {}
         self.loaded_properties = None
+        self.comparison_data = None  # NEW
 
         # Disable Apply button
         self.apply_tuning_btn.configure(state="disabled")
@@ -210,40 +221,44 @@ class TuningTab:
             "[INFO] All fields and data cleared. Next load will fetch fresh data from server."
         )
         self.gui_utils.update_status(
-            "Mode: Tuning value - Load properties first, then modify and apply changes"
+            "Mode: Tuning value - Load properties from BENI, FLUMEN, and REL paths"
         )
 
     def on_load_properties(self):
-        """Handle load properties button click - Enhanced to force fresh load"""
+        """Handle load properties button click - Enhanced for 3 paths"""
         beni_path = self.beni_entry.get().strip()
         flumen_path = self.flumen_entry.get().strip()
+        rel_path = self.rel_entry.get().strip()  # NEW
 
         # Validation - at least one path is required
         has_beni = beni_path and beni_path.startswith("//")
         has_flumen = flumen_path and flumen_path.startswith("//")
+        has_rel = rel_path and rel_path.startswith("//")  # NEW
 
-        if not has_beni and not has_flumen:
+        if not has_beni and not has_flumen and not has_rel:
             messagebox.showerror(
                 "No Paths",
-                "At least one depot path (BENI or FLUMEN) must be provided and start with //depot/...",
+                "At least one depot path (BENI, FLUMEN, or REL) must be provided and start with //depot/...",
             )
             return
 
-        self._load_properties(
-            beni_path if has_beni else "", flumen_path if has_flumen else ""
+        self._load_properties_enhanced(
+            beni_path if has_beni else "", 
+            flumen_path if has_flumen else "",
+            rel_path if has_rel else ""  # NEW
         )
 
-    def _load_properties(self, beni_path, flumen_path):
-        """Load properties in separate thread - Enhanced to always fetch fresh data"""
+    def _load_properties_enhanced(self, beni_path, flumen_path, rel_path):
+        """Load properties from 3 paths and handle comparison"""
         # Clear table and reset progress
         for item in self.properties_tree.get_children():
             self.properties_tree.delete(item)
         self.gui_utils.reset_progress(self.progress)
         self.gui_utils.clear_text_widget(self.log_text)
 
-        # Log that we're forcing fresh load
+        # Log that we're loading from 3 paths
         self.log_callback(
-            "[INFO] Loading fresh properties from server (ignoring local cache)..."
+            "[INFO] Loading properties from BENI, FLUMEN, and REL paths..."
         )
 
         # Disable buttons during processing
@@ -252,54 +267,36 @@ class TuningTab:
 
         def load_thread():
             try:
-                self.gui_utils.update_status("Processing: Loading properties from server...")
-                # The load_properties_for_tuning function will automatically sync latest version
-                self.loaded_properties = load_properties_for_tuning(
+                self.gui_utils.update_status("Processing: Loading properties from 3 paths...")
+                
+                # Load properties from all 3 paths
+                result = load_properties_for_tuning_enhanced(
                     beni_path,
                     flumen_path,
+                    rel_path,  # NEW parameter
                     self.progress_callback,
                     self.gui_utils.error_callback,
                     self.gui_utils.info_callback,
                 )
 
-                if self.loaded_properties:
-                    # Store original properties (without metadata)
-                    self.original_properties = {}
-                    for key, value in self.loaded_properties.items():
-                        if key != "_metadata":
-                            self.original_properties[key] = (
-                                value.copy() if isinstance(value, dict) else value
-                            )
-
-                    # Populate table
-                    self.gui_utils.root.after(
-                        0,
-                        lambda: self._populate_properties_table(self.loaded_properties),
-                    )
-                    self.gui_utils.root.after(
-                        0, lambda: self.apply_tuning_btn.configure(state="normal")
-                    )
-                    self.gui_utils.root.after(
-                        0,
-                        lambda: self.gui_utils.update_status(
-                            "Properties loaded successfully. You can now modify values and apply changes."
-                        ),
-                    )
-                    self.gui_utils.root.after(
-                        0,
-                        lambda: self.log_callback(
-                            "[INFO] Fresh properties loaded from server. Ready for modifications."
-                        ),
-                    )
+                if result:
+                    comparison_data, final_properties = result
+                    
+                    # Store comparison data
+                    self.comparison_data = comparison_data
+                    
+                    # Check if properties are identical across all paths
+                    if self._are_properties_identical(comparison_data):
+                        # Properties are identical - proceed normally
+                        self.log_callback("[INFO] Properties are identical across all paths.")
+                        self._finalize_properties_loading(final_properties)
+                    else:
+                        # Properties differ - show comparison dialog
+                        self.log_callback("[INFO] Properties differ between paths. Opening comparison dialog...")
+                        self.gui_utils.root.after(0, lambda: self._show_comparison_dialog(comparison_data))
                 else:
                     self.gui_utils.root.after(
                         0, lambda: self.gui_utils.update_status("Failed to load properties.")
-                    )
-                    self.gui_utils.root.after(
-                        0,
-                        lambda: self.log_callback(
-                            "[ERROR] Failed to load properties."
-                        ),
                     )
 
             finally:
@@ -312,15 +309,73 @@ class TuningTab:
         thread = threading.Thread(target=load_thread, daemon=True)
         thread.start()
 
+    def _are_properties_identical(self, comparison_data):
+        """Check if all paths have identical properties"""
+        if not comparison_data:
+            return True
+            
+        # Get all valid paths
+        valid_paths = [path for path in ['BENI', 'FLUMEN', 'REL'] if path in comparison_data]
+        
+        if len(valid_paths) <= 1:
+            return True
+            
+        # Compare first path with others
+        first_path = valid_paths[0]
+        first_props = comparison_data[first_path]
+        
+        for path in valid_paths[1:]:
+            current_props = comparison_data[path]
+            
+            # Compare LMKD
+            if first_props.get('LMKD', {}) != current_props.get('LMKD', {}):
+                return False
+                
+            # Compare Chimera
+            if first_props.get('Chimera', {}) != current_props.get('Chimera', {}):
+                return False
+                
+        return True
+
+    def _show_comparison_dialog(self, comparison_data):
+        """Show comparison dialog for user to choose source properties"""
+        dialog = ComparisonDialog(self.gui_utils.root, comparison_data)
+        if dialog.result:
+            chosen_path, chosen_properties = dialog.result
+            self.log_callback(f"[INFO] User selected properties from {chosen_path} path.")
+            self._finalize_properties_loading(chosen_properties)
+
+    def _finalize_properties_loading(self, final_properties):
+        """Finalize the properties loading process"""
+        self.loaded_properties = final_properties
+        
+        # Store original properties (without metadata)
+        self.original_properties = {}
+        for key, value in self.loaded_properties.items():
+            if key != "_metadata":
+                self.original_properties[key] = (
+                    value.copy() if isinstance(value, dict) else value
+                )
+
+        # Populate table
+        self._populate_properties_table(self.loaded_properties)
+        self.apply_tuning_btn.configure(state="normal")
+        self.gui_utils.update_status(
+            "Properties loaded successfully. You can now modify values and apply to all paths."
+        )
+        self.log_callback(
+            "[INFO] Properties loaded and ready for modifications."
+        )
+
     def on_apply_tuning(self):
-        """Handle apply tuning button click with delete support"""
+        """Handle apply tuning button click - Enhanced for 3 paths"""
         if not self.loaded_properties or "_metadata" not in self.loaded_properties:
             messagebox.showerror(
                 "No Data", "Please load properties first before applying changes."
             )
             return
 
-        # Get current properties from table (this will only include existing properties)
+        # Get current properties from table
         current_properties = self._get_table_properties()
 
         # Check if there are any changes (including deletions)
@@ -331,68 +386,22 @@ class TuningTab:
             )
             return
 
-        # Show changes summary including deletions
+        # Show changes summary
         changes_summary = self._get_changes_summary(current_properties)
         if changes_summary:
             confirm_message = (
-                f"The following changes will be applied:\n\n{changes_summary}\n\n"
+                f"The following changes will be applied to ALL PATHS:\n\n{changes_summary}\n\n"
             )
-            confirm_message += "This will apply all property changes to the target files and create a pending changelist.\n\n"
+            confirm_message += "This will apply all property changes to BENI, FLUMEN, and REL files and create a pending changelist.\n\n"
             confirm_message += "Do you want to continue?"
 
             if not messagebox.askyesno("Confirm Apply Changes", confirm_message):
                 return
 
-        self._run_apply_tuning(current_properties)
+        self._run_apply_tuning_enhanced(current_properties)
 
-    def _get_changes_summary(self, current_properties):
-        """Get summary of changes including additions, modifications, and deletions"""
-        changes = []
-
-        # Compare LMKD properties
-        original_lmkd = self.original_properties.get("LMKD", {})
-        current_lmkd = current_properties.get("LMKD", {})
-        lmkd_changes = self._compare_property_categories(
-            original_lmkd, current_lmkd, "LMKD"
-        )
-        changes.extend(lmkd_changes)
-
-        # Compare Chimera properties
-        original_chimera = self.original_properties.get("Chimera", {})
-        current_chimera = current_properties.get("Chimera", {})
-        chimera_changes = self._compare_property_categories(
-            original_chimera, current_chimera, "Chimera"
-        )
-        changes.extend(chimera_changes)
-
-        return "\n".join(changes) if changes else ""
-
-    def _compare_property_categories(self, original_dict, current_dict, category):
-        """Compare two property dictionaries and return list of changes"""
-        changes = []
-
-        all_keys = set(original_dict.keys()) | set(current_dict.keys())
-
-        for key in all_keys:
-            original_value = original_dict.get(key)
-            current_value = current_dict.get(key)
-
-            if original_value is None and current_value is not None:
-                # Added
-                changes.append(f"[ADDED] {category}.{key} = {current_value}")
-            elif original_value is not None and current_value is None:
-                # Deleted
-                changes.append(f"[DELETED] {category}.{key} (was: {original_value})")
-            elif original_value != current_value:
-                # Modified
-                changes.append(
-                    f"[MODIFIED] {category}.{key}: {original_value} â†’ {current_value}"
-                )
-
-        return changes
-
-    def _run_apply_tuning(self, current_properties):
-        """Run apply tuning process in separate thread"""
+    def _run_apply_tuning_enhanced(self, current_properties):
+        """Run apply tuning process for 3 paths"""
         # Clear tuning log and reset progress
         self.gui_utils.clear_text_widget(self.log_text)
         self.gui_utils.reset_progress(self.progress)
@@ -414,9 +423,9 @@ class TuningTab:
         def apply_thread():
             try:
                 self.gui_utils.update_status(
-                    "Processing: Applying tuning changes (including deletions)..."
+                    "Processing: Applying tuning changes to all paths..."
                 )
-                success = apply_tuning_changes(
+                success = apply_tuning_changes_enhanced(
                     current_properties,
                     depot_paths,
                     self.log_callback,
@@ -428,19 +437,19 @@ class TuningTab:
                     self.gui_utils.root.after(
                         0,
                         lambda: self.gui_utils.update_status(
-                            "Tuning changes applied successfully!"
+                            "Tuning changes applied successfully to all paths!"
                         ),
                     )
                     self.gui_utils.root.after(
                         0,
                         lambda: messagebox.showinfo(
                             "Success",
-                            "Tuning changes have been applied successfully!\n"
+                            "Tuning changes have been applied successfully to all paths!\n"
                             "Check the log for changelist details.",
                         ),
                     )
 
-                    # Update original properties to reflect current state
+                    # Update original properties
                     self.gui_utils.root.after(
                         0,
                         lambda: self._update_original_properties_after_apply(
@@ -492,6 +501,52 @@ class TuningTab:
             return False
 
         return True
+
+    def _get_changes_summary(self, current_properties):
+        """Get summary of changes including additions, modifications, and deletions"""
+        changes = []
+
+        # Compare LMKD properties
+        original_lmkd = self.original_properties.get("LMKD", {})
+        current_lmkd = current_properties.get("LMKD", {})
+        lmkd_changes = self._compare_property_categories(
+            original_lmkd, current_lmkd, "LMKD"
+        )
+        changes.extend(lmkd_changes)
+
+        # Compare Chimera properties
+        original_chimera = self.original_properties.get("Chimera", {})
+        current_chimera = current_properties.get("Chimera", {})
+        chimera_changes = self._compare_property_categories(
+            original_chimera, current_chimera, "Chimera"
+        )
+        changes.extend(chimera_changes)
+
+        return "\n".join(changes) if changes else ""
+
+    def _compare_property_categories(self, original_dict, current_dict, category):
+        """Compare two property dictionaries and return list of changes"""
+        changes = []
+
+        all_keys = set(original_dict.keys()) | set(current_dict.keys())
+
+        for key in all_keys:
+            original_value = original_dict.get(key)
+            current_value = current_dict.get(key)
+
+            if original_value is None and current_value is not None:
+                # Added
+                changes.append(f"[ADDED] {category}.{key} = {current_value}")
+            elif original_value is not None and current_value is None:
+                # Deleted
+                changes.append(f"[DELETED] {category}.{key} (was: {original_value})")
+            elif original_value != current_value:
+                # Modified
+                changes.append(
+                    f"[MODIFIED] {category}.{key}: {original_value} → {current_value}"
+                )
+
+        return changes
 
     def _populate_properties_table(self, properties_data):
         """Populate the properties table with loaded data"""
@@ -598,11 +653,11 @@ class TuningTab:
                 if messagebox.askyesno(
                     "Confirm Delete Category",
                     f"Are you sure you want to delete all properties in '{values[0]}' category?\n\n"
-                    f"This will delete {len(children)} properties and they will be removed from the file when you apply changes.",
+                    f"This will delete {len(children)} properties and they will be removed from ALL files when you apply changes.",
                 ):
                     self.properties_tree.delete(item)
                     self.log_callback(
-                        f"[INFO] Deleted all properties in {values[0]} category. Apply changes to update files."
+                        f"[INFO] Deleted all properties in {values[0]} category. Apply changes to update all files."
                     )
                 return
             else:
@@ -619,11 +674,11 @@ class TuningTab:
             if messagebox.askyesno(
                 "Confirm Delete Property",
                 f"Are you sure you want to delete property '{values[1]}'?\n\n"
-                f"This property will be removed from the file when you apply changes.",
+                f"This property will be removed from ALL files when you apply changes.",
             ):
                 self.properties_tree.delete(item)
                 self.log_callback(
-                    f"[INFO] Deleted property {values[0]}.{values[1]}. Apply changes to update files."
+                    f"[INFO] Deleted property {values[0]}.{values[1]}. Apply changes to update all files."
                 )
 
                 # Check if parent category is now empty and remove if so
@@ -643,7 +698,7 @@ class TuningTab:
         )
 
     def _get_table_properties(self):
-        """Extract properties from the table (only includes existing properties, excludes deleted ones)"""
+        """Extract properties from the table"""
         properties = {"LMKD": {}, "Chimera": {}}
 
         for parent in self.properties_tree.get_children():
