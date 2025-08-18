@@ -25,9 +25,9 @@ class BringupTab:
 
     def create_content(self):
         """Create content for bringup mode"""
-        # Input fields frame
+        # Input fields frame - Changed from "Configuration" to "Vendor"
         input_frame = ttk.LabelFrame(
-            self.frame, text="Configuration", padding=10
+            self.frame, text="Vendor", padding=10
         )
         input_frame.pack(fill="x", pady=(0, 10))
 
@@ -52,12 +52,19 @@ class BringupTab:
         self.flumen_entry = ttk.Entry(input_frame, width=70)
         self.flumen_entry.grid(column=1, row=2, padx=5, pady=2, sticky="ew")
 
+        # REL Path - NEW addition
+        ttk.Label(input_frame, text="REL Depot Path:").grid(
+            column=0, row=3, sticky="w", pady=2
+        )
+        self.rel_entry = ttk.Entry(input_frame, width=70)
+        self.rel_entry.grid(column=1, row=3, padx=5, pady=2, sticky="ew")
+
         # Configure grid weights
         input_frame.columnconfigure(1, weight=1)
 
-        # Control frame
+        # Control frame - Updated row position due to new REL field
         control_frame = ttk.Frame(input_frame)
-        control_frame.grid(column=1, row=3, pady=10, sticky="e")
+        control_frame.grid(column=1, row=4, pady=10, sticky="e")
 
         # Progress bar
         self.progress = ttk.Progressbar(
@@ -71,12 +78,12 @@ class BringupTab:
         )
         self.start_btn.pack(side="right")
 
-        # Log output frame
+        # Log output frame - Reduced height as requested
         log_frame = ttk.LabelFrame(self.frame, text="Process Log", padding=5)
         log_frame.pack(fill="both", expand=True)
 
-        # Create text widget with scrollbar
-        self.log_text = self.gui_utils.create_text_with_scrollbar(log_frame, height=20)
+        # Create text widget with scrollbar - Reduced height from 20 to 12
+        self.log_text = self.gui_utils.create_text_with_scrollbar(log_frame, height=12)
 
         # Create callbacks
         self.log_callback = self.gui_utils.create_log_callback(self.log_text)
@@ -92,10 +99,11 @@ class BringupTab:
 
     def clear_all(self):
         """Clear all input fields and logs"""
-        # Clear input fields
+        # Clear input fields - Added REL field
         self.beni_entry.delete(0, tk.END)
         self.vince_entry.delete(0, tk.END)
         self.flumen_entry.delete(0, tk.END)
+        self.rel_entry.delete(0, tk.END)  # NEW
 
         # Clear log output
         self.gui_utils.clear_text_widget(self.log_text)
@@ -104,8 +112,9 @@ class BringupTab:
         self.gui_utils.reset_progress(self.progress)
 
         self.log_callback("[INFO] All fields and logs cleared.")
+        # Updated status message to include REL
         self.gui_utils.update_status(
-            "Mode: Bring up - VINCE is mandatory, BENI and FLUMEN are optional"
+            "Mode: Bring up - VINCE is mandatory, BENI, FLUMEN and REL are optional"
         )
 
     def on_start(self):
@@ -113,6 +122,7 @@ class BringupTab:
         beni_path = self.beni_entry.get().strip()
         vince_path = self.vince_entry.get().strip()
         flumen_path = self.flumen_entry.get().strip()
+        rel_path = self.rel_entry.get().strip()  # NEW
 
         # Validation - VINCE is mandatory
         if not vince_path.startswith("//"):
@@ -122,20 +132,22 @@ class BringupTab:
             )
             return
 
-        # Check if at least one target (BENI or FLUMEN) is provided
+        # Check if at least one target (BENI, FLUMEN, or REL) is provided
         has_beni = beni_path and beni_path.startswith("//")
         has_flumen = flumen_path and flumen_path.startswith("//")
+        has_rel = rel_path and rel_path.startswith("//")  # NEW
 
-        if not has_beni and not has_flumen:
+        if not has_beni and not has_flumen and not has_rel:  # Updated condition
             messagebox.showerror(
                 "No Target Paths",
-                "At least one target path (BENI or FLUMEN) must be provided and start with //depot/...",
+                "At least one target path (BENI, FLUMEN, or REL) must be provided and start with //depot/...",
             )
             return
 
-        self._run_process(beni_path, vince_path, flumen_path)
+        # Pass REL path to process function
+        self._run_process(beni_path, vince_path, flumen_path, rel_path)
 
-    def _run_process(self, beni_path, vince_path, flumen_path):
+    def _run_process(self, beni_path, vince_path, flumen_path, rel_path):  # Added rel_path parameter
         """Run bringup process in separate thread"""
         # Clear log and reset progress
         self.gui_utils.clear_text_widget(self.log_text)
@@ -154,10 +166,12 @@ class BringupTab:
         def run_process_thread():
             try:
                 self.gui_utils.update_status("Processing: Running bring up operation...")
+                # Updated function call to include rel_path
                 run_bringup_process(
                     beni_path,
                     vince_path,
                     flumen_path,
+                    rel_path,  # NEW parameter
                     self.log_callback,
                     self.progress_callback,
                     self.gui_utils.error_callback,
