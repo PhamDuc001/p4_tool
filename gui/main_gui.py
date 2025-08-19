@@ -1,6 +1,7 @@
 """
 Main window implementation for the Tuning Tool
 Handles the main application window, navigation tabs, and mode switching
+Updated to support enhanced 3-path tuning functionality and System bringup
 """
 
 import tkinter as tk
@@ -13,12 +14,12 @@ from gui.gui_utils import GUIUtils
 
 
 class BringupToolGUI:
-    """Main GUI class for the Tuning Tool with Parse Mode"""
+    """Main GUI class for the Tuning Tool with Parse Mode and Enhanced Tuning"""
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Tuning Tool - LMKD & Chimera Sync + Parse")
-        self.root.geometry("1000x700")
+        self.root.title("P4 tool")
+        self.root.geometry("1000x800")  # Increased height for System section
         self.root.minsize(600, 900)
 
         # Current mode
@@ -103,7 +104,7 @@ class BringupToolGUI:
 
         if tab_text == "Bring up":
             self.switch_mode("bringup")
-        elif tab_text == "Tuning value":
+        elif "Tuning value" in tab_text:  # Support both old and new tab names
             self.switch_mode("tuning")
         elif tab_text == "Parse":
             self.switch_mode("parse")
@@ -119,17 +120,17 @@ class BringupToolGUI:
         if mode == "bringup":
             self.bringup_tab.show()
             self.status_var.set(
-                "Mode: Bring up - VINCE is mandatory, BENI and FLUMEN are optional"
+                "Mode: Bring up - Vendor: depot paths | System: workspaces (TEMPLATE_*)"
             )
         elif mode == "tuning":
             self.tuning_tab.show()
             self.status_var.set(
-                "Mode: Tuning value - Load properties first, then modify and apply changes"
+                "Mode: Tuning value - Load properties from BENI, FLUMEN, and REL paths"
             )
         elif mode == "parse":
             self.parse_tab.show()
             self.status_var.set(
-                "Mode: Parse - Enter workspace names to find device_common.mk files"
+                "Mode: Parse - Calculate library size"
             )
 
     def on_clear(self):
