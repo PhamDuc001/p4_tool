@@ -8,8 +8,8 @@ from typing import List, Optional
 from config.p4_config import get_client_name
 
 # Export the function for use by other modules  
-__all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'create_changelist', 
-           'create_changelist_silent', 'map_client', 'map_client_two_paths', 
+__all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'validate_device_common_mk_path',
+           'create_changelist', 'create_changelist_silent', 'map_client', 'map_client_two_paths', 
            'map_single_depot', 'map_two_depots_silent', 'sync_file', 'sync_file_silent', 
            'checkout_file', 'checkout_file_silent', 'is_workspace_like', 
            'resolve_workspace_to_device_common_path', 'resolve_user_input_to_depot_path']
@@ -30,6 +30,25 @@ def validate_depot_path(depot_path):
         return True
     except:
         return False
+
+def validate_device_common_mk_path(depot_path):
+    """
+    Validate if depot path exists and is a device_common.mk file
+    Returns (exists, is_device_common_mk)
+    """
+    try:
+        # Check if path exists
+        result = subprocess.run(f"p4 files {depot_path}", capture_output=True, text=True, shell=True)
+        if result.returncode != 0 or "no such file" in result.stderr.lower():
+            return False, False
+        
+        # Check if it's a device_common.mk file
+        is_device_common = depot_path.endswith("/device_common.mk")
+        
+        return True, is_device_common
+        
+    except:
+        return False, False
 
 def create_changelist(log_callback):
     """Create pending changelist"""

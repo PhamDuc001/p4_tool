@@ -1,6 +1,7 @@
 """
 Enhanced System process implementation
 Handles the system bringup workflow for workspace-based operations with improved rscmgr handling
+Enhanced to support mixed input (depot paths and workspaces)
 """
 
 import os
@@ -9,7 +10,9 @@ import subprocess
 from P4 import P4, P4Exception
 from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
-    map_single_depot, sync_file_silent, checkout_file_silent
+    map_single_depot, sync_file_silent, checkout_file_silent,
+    validate_device_common_mk_path, resolve_workspace_to_device_common_path,
+    is_workspace_like
 )
 from config.p4_config import depot_to_local_path
 from processes.parse_process import validate_workspace_exists
@@ -75,6 +78,52 @@ def find_device_common_mk_path(workspace_name, log_callback=None):
             pass
 
 
+def resolve_input_to_device_common_path(user_input, log_callback=None):
+    """
+    Resolve user input (depot path or workspace) to device_common.mk depot path
+    Returns the resolved device_common.mk path
+    """
+    user_input = user_input.strip()
+    
+    if not user_input:
+        return None
+    
+    # If it's a depot path
+    if user_input.startswith("//"):
+        if log_callback:
+            log_callback(f"[INPUT] Detected depot path: {user_input}")
+        
+        # Validate path exists and is device_common.mk
+        exists, is_device_common = validate_device_common_mk_path(user_input)
+        
+        if not exists:
+            raise RuntimeError(f"Depot path does not exist: {user_input}")
+        
+        if not is_device_common:
+            raise RuntimeError(f"Path must be a device_common.mk file: {user_input}")
+        
+        if log_callback:
+            log_callback(f"[OK] Valid device_common.mk path: {user_input}")
+        
+        return user_input
+    
+    # If it's a workspace
+    elif is_workspace_like(user_input):
+        if log_callback:
+            log_callback(f"[INPUT] Detected workspace: {user_input}")
+        
+        try:
+            resolved_path = resolve_workspace_to_device_common_path(user_input)
+            if log_callback:
+                log_callback(f"[OK] Resolved workspace to: {resolved_path}")
+            return resolved_path
+        except Exception as e:
+            raise RuntimeError(f"Workspace resolution failed: {str(e)}")
+    
+    else:
+        raise RuntimeError(f"Input must be either device_common.mk depot path (//depot/...) or workspace (TEMPLATE_*): {user_input}")
+
+
 def check_readahead_feature(device_common_path, log_callback=None):
     """
     Check if device_common.mk contains readahead feature (rscmgr.rc)
@@ -117,7 +166,7 @@ def find_filtered_samsung_vendor_paths(all_view_paths, log_callback=None):
         log_callback("[SYSTEM] Searching for filtered vendor/samsung paths...")
     
     samsung_paths = []
-    valid_prefixes = ["//PROD_VINCE", "//MODEL", "//BENI"]
+    valid_prefixes = ["//PROD_VINCE", "//MODEL", "//BENI", "//PROD_BENI", "//VINCE"]
     
     for path in all_view_paths:
         # Check if path starts with valid prefixes
@@ -254,8 +303,8 @@ def add_rscmgr_reference_to_device_common(device_common_path, rscmgr_filename, l
         
         # Add rscmgr reference at the end
         lines.append('\n')  # Add empty line
-        lines.append('#Rscmgr file\n')
-        lines.append('Property add +/\n')
+        lines.append('# Rscmgr \n')
+        lines.append('PRODUCT_PACKAGES += \\\n')
         lines.append(f'    {rscmgr_filename}\n')
         
         # Write updated content
@@ -384,28 +433,42 @@ def add_file_to_p4(file_depot_path, changelist_id, log_callback=None):
         raise
 
 
-def process_target_workspace_enhanced(workspace_name, category, vince_rscmgr_filename, vince_rscmgr_path, 
+def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_filename, vince_rscmgr_path, 
                                     changelist_id, log_callback=None):
     """
-    Enhanced processing of target workspace (BENI, FLUMEN, or REL) with improved rscmgr handling
+    Enhanced processing of target workspace/path (BENI, FLUMEN, or REL) with improved rscmgr handling
+    Now supports both workspace and depot path input
     Returns updated changelist_id (may create new one if none provided)
     """
     if log_callback:
-        log_callback(f"\n[SYSTEM] Processing {category} workspace: {workspace_name}")
+        log_callback(f"\n[SYSTEM] Processing {category} input: {workspace_or_path}")
     
     current_changelist_id = changelist_id
     
     try:
-        # Find device_common.mk path
-        device_common_path, all_view_paths = find_device_common_mk_path(workspace_name, log_callback)
+        # Resolve input to device_common.mk path
+        device_common_path = resolve_input_to_device_common_path(workspace_or_path, log_callback)
         if not device_common_path:
             if log_callback:
-                log_callback(f"[ERROR] No device_common.mk found in {category} workspace")
+                log_callback(f"[ERROR] Failed to resolve {category} input to device_common.mk")
             return current_changelist_id
         
         # Map and sync device_common.mk
         map_single_depot(device_common_path, log_callback)
         sync_file_silent(device_common_path)
+        
+        # Get all view paths - need to handle both workspace and depot path cases
+        all_view_paths = []
+        
+        # If input was workspace, get view paths from workspace
+        if is_workspace_like(workspace_or_path):
+            try:
+                _, all_view_paths = find_device_common_mk_path(workspace_or_path, log_callback)
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"[WARNING] Could not get view paths from workspace: {str(e)}")
+                # For depot path input, we'll need to construct samsung paths differently
+                all_view_paths = []
         
         # Check existing rscmgr reference in device_common.mk
         existing_rscmgr = get_rscmgr_reference_from_device_common(device_common_path, log_callback)
@@ -448,6 +511,20 @@ def process_target_workspace_enhanced(workspace_name, category, vince_rscmgr_fil
         
         # Find filtered samsung vendor paths
         samsung_paths = find_filtered_samsung_vendor_paths(all_view_paths, log_callback)
+        
+        # If no samsung paths found from workspace (e.g., depot path input), try to construct from device_common path
+        if not samsung_paths and device_common_path:
+            if log_callback:
+                log_callback("[FALLBACK] Attempting to construct samsung paths from device_common.mk path...")
+            
+            # Extract base path from device_common.mk path
+            # e.g., //depot/vendor/samsung/... -> //depot/vendor/samsung/
+            base_path_match = re.search(r'^(.+/vendor/samsung/)', device_common_path)
+            if base_path_match:
+                base_samsung_path = base_path_match.group(1)
+                samsung_paths = [base_samsung_path]
+                if log_callback:
+                    log_callback(f"[FALLBACK] Constructed samsung path: {base_samsung_path}")
         
         # Find rscmgr file in samsung paths
         target_rscmgr_path = find_rscmgr_file_in_samsung_paths(samsung_paths, vince_rscmgr_filename, log_callback)
@@ -513,78 +590,70 @@ def process_target_workspace_enhanced(workspace_name, category, vince_rscmgr_fil
         
     except Exception as e:
         if log_callback:
-            log_callback(f"[ERROR] Failed to process {category} workspace: {str(e)}")
+            log_callback(f"[ERROR] Failed to process {category} input: {str(e)}")
         return current_changelist_id
 
 
-def run_system_process(beni_workspace, vince_workspace, flumen_workspace, rel_workspace,
+def run_system_process(beni_input, vince_input, flumen_input, rel_input,
                       log_callback, progress_callback=None, error_callback=None):
     """
-    Execute the enhanced system bringup process for workspace-based operations
+    Execute the enhanced system bringup process for mixed input operations (workspace and depot paths)
     """
     try:
         # ============================================================================
-        # STEP 1: VALIDATE WORKSPACES
+        # STEP 1: VALIDATE INPUTS - ENHANCED FOR MIXED INPUT
         # ============================================================================
-        log_callback("[SYSTEM] Starting enhanced system bringup process...")
+        log_callback("[SYSTEM] Starting enhanced system bringup process (mixed input support)...")
         
-        # Validate mandatory workspaces
-        log_callback("[VALIDATION] Validating VINCE workspace...")
-        success, msg = validate_workspace_exists(vince_workspace)
-        if not success:
-            error_msg = f"VINCE workspace validation failed: {msg}"
+        # Validate mandatory VINCE input
+        log_callback("[VALIDATION] Validating VINCE input...")
+        try:
+            vince_device_common_path = resolve_input_to_device_common_path(vince_input, log_callback)
+        except Exception as e:
+            error_msg = f"VINCE input validation failed: {str(e)}"
             log_callback(f"[ERROR] {error_msg}")
             if error_callback:
-                error_callback("Workspace Not Found", error_msg)
+                error_callback("VINCE Validation Failed", error_msg)
             return
-        log_callback(f"[OK] {msg}")
         
-        log_callback("[VALIDATION] Validating BENI workspace...")
-        success, msg = validate_workspace_exists(beni_workspace)
-        if not success:
-            error_msg = f"BENI workspace validation failed: {msg}"
+        # Validate mandatory BENI input
+        log_callback("[VALIDATION] Validating BENI input...")
+        try:
+            beni_device_common_path = resolve_input_to_device_common_path(beni_input, log_callback)
+        except Exception as e:
+            error_msg = f"BENI input validation failed: {str(e)}"
             log_callback(f"[ERROR] {error_msg}")
             if error_callback:
-                error_callback("Workspace Not Found", error_msg)
+                error_callback("BENI Validation Failed", error_msg)
             return
-        log_callback(f"[OK] {msg}")
         
-        # Validate optional workspaces
+        # Validate optional inputs
         valid_targets = []
-        if flumen_workspace:
-            log_callback("[VALIDATION] Validating FLUMEN workspace...")
-            success, msg = validate_workspace_exists(flumen_workspace)
-            if success:
-                log_callback(f"[OK] {msg}")
-                valid_targets.append(("FLUMEN", flumen_workspace))
-            else:
-                log_callback(f"[WARNING] FLUMEN workspace validation failed: {msg}")
+        if flumen_input:
+            log_callback("[VALIDATION] Validating FLUMEN input...")
+            try:
+                flumen_device_common_path = resolve_input_to_device_common_path(flumen_input, log_callback)
+                valid_targets.append(("FLUMEN", flumen_input))
+                log_callback("[OK] FLUMEN input validated successfully")
+            except Exception as e:
+                log_callback(f"[WARNING] FLUMEN input validation failed: {str(e)}")
         
-        if rel_workspace:
-            log_callback("[VALIDATION] Validating REL workspace...")
-            success, msg = validate_workspace_exists(rel_workspace)
-            if success:
-                log_callback(f"[OK] {msg}")
-                valid_targets.append(("REL", rel_workspace))
-            else:
-                log_callback(f"[WARNING] REL workspace validation failed: {msg}")
+        if rel_input:
+            log_callback("[VALIDATION] Validating REL input...")
+            try:
+                rel_device_common_path = resolve_input_to_device_common_path(rel_input, log_callback)
+                valid_targets.append(("REL", rel_input))
+                log_callback("[OK] REL input validated successfully")
+            except Exception as e:
+                log_callback(f"[WARNING] REL input validation failed: {str(e)}")
 
         if progress_callback:
             progress_callback(20)
 
         # ============================================================================
-        # STEP 2: PROCESS VINCE WORKSPACE (Master source) - ENHANCED
+        # STEP 2: PROCESS VINCE INPUT (Master source) - ENHANCED FOR MIXED INPUT
         # ============================================================================
-        log_callback("\n[SYSTEM] Processing VINCE workspace (master source)...")
-        
-        # Find device_common.mk path in VINCE
-        vince_device_common_path, vince_all_paths = find_device_common_mk_path(vince_workspace, log_callback)
-        if not vince_device_common_path:
-            error_msg = "No device_common.mk found in VINCE workspace"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("File Not Found", error_msg)
-            return
+        log_callback("\n[SYSTEM] Processing VINCE input (master source)...")
         
         # Map and sync VINCE device_common.mk
         map_single_depot(vince_device_common_path, log_callback)
@@ -602,13 +671,41 @@ def run_system_process(beni_workspace, vince_workspace, flumen_workspace, rel_wo
         if progress_callback:
             progress_callback(40)
         
-        # Find filtered samsung vendor paths in VINCE (ENHANCED)
-        vince_samsung_paths = find_filtered_samsung_vendor_paths(vince_all_paths, log_callback)
+        # Find VINCE rscmgr file - need to handle both workspace and depot path input
+        vince_rscmgr_path = None
         
-        # Find VINCE rscmgr file using enhanced logic
-        vince_rscmgr_path = find_rscmgr_file_in_samsung_paths(vince_samsung_paths, vince_rscmgr_filename, log_callback)
+        # If VINCE input was workspace, use workspace logic
+        if is_workspace_like(vince_input):
+            # Find filtered samsung vendor paths in VINCE
+            try:
+                _, vince_all_paths = find_device_common_mk_path(vince_input, log_callback)
+                vince_samsung_paths = find_filtered_samsung_vendor_paths(vince_all_paths, log_callback)
+                vince_rscmgr_path = find_rscmgr_file_in_samsung_paths(vince_samsung_paths, vince_rscmgr_filename, log_callback)
+            except Exception as e:
+                if log_callback:
+                    log_callback(f"[WARNING] Workspace-based rscmgr search failed: {str(e)}")
+        
+        # If not found or depot path input, try path-based construction
         if not vince_rscmgr_path:
-            error_msg = f"VINCE {vince_rscmgr_filename} not found in filtered samsung vendor paths"
+            if log_callback:
+                log_callback("[FALLBACK] Attempting path-based rscmgr file construction...")
+            
+            # Extract base path from device_common.mk path and construct rscmgr path
+            base_path_match = re.search(r'^(.+/vendor/samsung/)', vince_device_common_path)
+            if base_path_match:
+                base_samsung_path = base_path_match.group(1)
+                vince_rscmgr_path = construct_rscmgr_file_path(base_samsung_path, vince_rscmgr_filename, log_callback)
+                
+                # Validate constructed path
+                try:
+                    result = subprocess.run(f"p4 files {vince_rscmgr_path}", capture_output=True, text=True, shell=True)
+                    if result.returncode != 0 or "no such file" in result.stderr.lower():
+                        vince_rscmgr_path = None
+                except:
+                    vince_rscmgr_path = None
+        
+        if not vince_rscmgr_path:
+            error_msg = f"VINCE {vince_rscmgr_filename} not found in vendor/samsung paths"
             log_callback(f"[ERROR] {error_msg}")
             if error_callback:
                 error_callback("File Not Found", error_msg)
@@ -624,25 +721,25 @@ def run_system_process(beni_workspace, vince_workspace, flumen_workspace, rel_wo
             progress_callback(60)
 
         # ============================================================================
-        # STEP 3: PROCESS TARGET WORKSPACES WITH ENHANCED LOGIC
+        # STEP 3: PROCESS TARGET INPUTS WITH ENHANCED MIXED INPUT LOGIC
         # ============================================================================
         shared_changelist_id = None  # Will be created when first needed
         
-        # Process BENI workspace (Mandatory target) - ENHANCED
-        log_callback(f"\n[SYSTEM] Processing BENI workspace with enhanced logic...")
+        # Process BENI input (Mandatory target) - ENHANCED FOR MIXED INPUT
+        log_callback(f"\n[SYSTEM] Processing BENI input with enhanced mixed input logic...")
         shared_changelist_id = process_target_workspace_enhanced(
-            beni_workspace, "BENI", vince_rscmgr_filename, vince_rscmgr_path, 
+            beni_input, "BENI", vince_rscmgr_filename, vince_rscmgr_path, 
             shared_changelist_id, log_callback
         )
 
         if progress_callback:
             progress_callback(75)
 
-        # Process optional target workspaces - ENHANCED
-        for category, workspace in valid_targets:
-            log_callback(f"\n[SYSTEM] Processing {category} workspace with enhanced logic...")
+        # Process optional target inputs - ENHANCED FOR MIXED INPUT
+        for category, input_value in valid_targets:
+            log_callback(f"\n[SYSTEM] Processing {category} input with enhanced mixed input logic...")
             shared_changelist_id = process_target_workspace_enhanced(
-                workspace, category, vince_rscmgr_filename, vince_rscmgr_path, 
+                input_value, category, vince_rscmgr_filename, vince_rscmgr_path, 
                 shared_changelist_id, log_callback
             )
 
@@ -654,8 +751,9 @@ def run_system_process(beni_workspace, vince_workspace, flumen_workspace, rel_wo
         # ============================================================================
         processed_targets = ["BENI"] + [cat for cat, _ in valid_targets]
         log_callback(f"\n[SYSTEM] Enhanced system bringup process completed successfully!")
-        log_callback(f"[SUMMARY] Processed workspaces: {', '.join(processed_targets)}")
+        log_callback(f"[SUMMARY] Processed inputs: {', '.join(processed_targets)}")
         log_callback(f"[SUMMARY] Master rscmgr file: {vince_rscmgr_filename}")
+        log_callback(f"[SUMMARY] Mixed input support: depot paths and workspaces accepted")
         
         if shared_changelist_id:
             log_callback(f"[SUMMARY] All modifications are in shared changelist: {shared_changelist_id}")
