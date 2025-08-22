@@ -56,8 +56,31 @@ def replace_block(target_lines, block_lines, start_header, next_header_list):
 
     return target_lines[:start] + block_lines + target_lines[end:]
 
+# def update_lmkd_chimera(vince_path, target_path, log_callback):
+#     """Update LMKD and Chimera properties in target file"""
+#     target_name = "BENI" if "beni" in target_path.lower() else "FLUMEN" if "flumen" in target_path.lower() else "TARGET"
+#     log_callback(f"[STEP 3] Updating LMKD and Chimera properties in {target_name}...")
+    
+#     with open(vince_path, "r", encoding="utf-8") as f:
+#         vince_lines = f.readlines()
+#     with open(target_path, "r", encoding="utf-8") as f:
+#         target_lines = f.readlines()
+
+#     lmkd_block = extract_block(vince_lines, "# LMKD property", ["# Chimera property", "# DHA property"])
+#     if not lmkd_block:
+#         lmkd_block = extract_block(vince_lines, "# DHA property", ["# Chimera property"])
+#     chimera_block = extract_block(vince_lines, "# Chimera property", ["# Nandswap", "#", ""]) 
+
+#     updated_target = replace_block(target_lines, lmkd_block, "# LMKD property", ["# Chimera property", "# DHA property"])
+#     updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["# Nandswap", "#", ""]) 
+
+#     # Write updated file without creating a backup
+#     with open(target_path, "w", encoding="utf-8") as f:
+#         f.writelines(updated_target)
+#     log_callback(f"[OK] Updated {target_name} file.")
+
 def update_lmkd_chimera(vince_path, target_path, log_callback):
-    """Update LMKD and Chimera properties in target file"""
+    """Update LMKD and Chimera properties in target file - Enhanced to add missing sections"""
     target_name = "BENI" if "beni" in target_path.lower() else "FLUMEN" if "flumen" in target_path.lower() else "TARGET"
     log_callback(f"[STEP 3] Updating LMKD and Chimera properties in {target_name}...")
     
@@ -66,13 +89,60 @@ def update_lmkd_chimera(vince_path, target_path, log_callback):
     with open(target_path, "r", encoding="utf-8") as f:
         target_lines = f.readlines()
 
-    lmkd_block = extract_block(vince_lines, "# LMKD property", ["# Chimera property", "# DHA property"])
+    # Extract blocks from VINCE
+    lmkd_block = extract_block(vince_lines, "# LMKD property", ["#", ""])
     if not lmkd_block:
-        lmkd_block = extract_block(vince_lines, "# DHA property", ["# Chimera property"])
-    chimera_block = extract_block(vince_lines, "# Chimera property", ["# Nandswap", "#", ""]) 
+        lmkd_block = extract_block(vince_lines, "# DHA property", ["#", ""])
+    chimera_block = extract_block(vince_lines, "# Chimera property", ["#", ""]) 
 
-    updated_target = replace_block(target_lines, lmkd_block, "# LMKD property", ["# Chimera property", "# DHA property"])
-    updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["# Nandswap", "#", ""]) 
+    # Check what sections exist in target
+    has_lmkd = any("# LMKD property" in line for line in target_lines)
+    has_dha = any("# DHA property" in line for line in target_lines)
+    has_chimera = any("# Chimera property" in line for line in target_lines)
+    
+    # Determine which LMKD/DHA header to use based on VINCE
+    lmkd_header = "# LMKD property" if any("# LMKD property" in line for line in vince_lines) else "# DHA property"
+    
+    updated_target = target_lines[:]
+    
+    # Update existing sections
+    if has_lmkd or has_dha:
+        # Replace existing LMKD section
+        if has_lmkd:
+            updated_target = replace_block(updated_target, lmkd_block, "# LMKD property", ["#", ""])
+        elif has_dha:
+            updated_target = replace_block(updated_target, lmkd_block, "# DHA property", ["#", ""])
+    
+    if has_chimera:
+        # Replace existing Chimera section
+        updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["#", ""]) 
+    
+    # Add missing sections to end of file
+    sections_to_add = []
+    
+    # Check if we need to add LMKD/DHA section
+    if not has_lmkd and not has_dha and lmkd_block:
+        sections_to_add.append(lmkd_block)
+    
+    # Check if we need to add Chimera section  
+    if not has_chimera and chimera_block:
+        sections_to_add.append(chimera_block)
+    
+    # Add missing sections to end of file
+    if sections_to_add:
+        # Ensure file ends with newline before adding sections
+        if updated_target and not updated_target[-1].endswith('\n'):
+            updated_target[-1] = updated_target[-1] + '\n'
+        
+        # Add a blank line before first new section
+        updated_target.append('\n')
+        
+        # Add each missing section
+        for section_block in sections_to_add:
+            updated_target.extend(section_block)
+            # Add blank line after each section (except last)
+            if section_block != sections_to_add[-1]:
+                updated_target.append('\n')
 
     # Write updated file without creating a backup
     with open(target_path, "w", encoding="utf-8") as f:
