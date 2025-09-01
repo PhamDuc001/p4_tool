@@ -1,7 +1,7 @@
 """
 Main window implementation for the Tuning Tool
 Handles the main application window, navigation tabs, and mode switching
-Updated to support enhanced 3-path tuning functionality and System bringup
+Updated to support enhanced 3-path tuning functionality, System bringup, and Readahead mode
 """
 
 import tkinter as tk
@@ -10,17 +10,18 @@ from config.p4_config import initialize_p4_config
 from gui.bringup_tab import BringupTab
 from gui.tuning_tab import TuningTab
 from gui.parse_tab import ParseTab
+from gui.readahead_tab import ReadaheadTab
 from gui.gui_utils import GUIUtils
 
 
 class BringupToolGUI:
-    """Main GUI class for the Tuning Tool with Parse Mode and Enhanced Tuning"""
+    """Main GUI class for the Tuning Tool with Parse Mode, Enhanced Tuning, and Readahead"""
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("P4 tool")
-        self.root.geometry("1000x800")  # Increased height for System section
-        self.root.minsize(600, 900)
+        self.root.geometry("1200x900")  # Increased size for Readahead mode
+        self.root.minsize(800, 900)
 
         # Current mode
         self.current_mode = tk.StringVar(value="bringup")
@@ -35,6 +36,7 @@ class BringupToolGUI:
         self.bringup_tab = None
         self.tuning_tab = None
         self.parse_tab = None
+        self.readahead_tab = None
 
         # Create GUI components
         self.create_navbar()
@@ -58,11 +60,13 @@ class BringupToolGUI:
         self.bringup_tab_frame = ttk.Frame(self.notebook)
         self.tuning_tab_frame = ttk.Frame(self.notebook)
         self.parse_tab_frame = ttk.Frame(self.notebook)
+        self.readahead_tab_frame = ttk.Frame(self.notebook)
 
         # Add tabs to notebook
         self.notebook.add(self.bringup_tab_frame, text="Bring up")
         self.notebook.add(self.tuning_tab_frame, text="Tuning value")
         self.notebook.add(self.parse_tab_frame, text="Parse")
+        self.notebook.add(self.readahead_tab_frame, text="Readahead")
 
         # Bind tab change event
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
@@ -77,6 +81,7 @@ class BringupToolGUI:
         self.bringup_tab = BringupTab(self.main_frame, self.gui_utils)
         self.tuning_tab = TuningTab(self.main_frame, self.gui_utils)
         self.parse_tab = ParseTab(self.main_frame, self.gui_utils)
+        self.readahead_tab = ReadaheadTab(self.main_frame, self.gui_utils)
 
     def create_status_bar(self):
         """Create status bar"""
@@ -108,6 +113,8 @@ class BringupToolGUI:
             self.switch_mode("tuning")
         elif tab_text == "Parse":
             self.switch_mode("parse")
+        elif tab_text == "Readahead":
+            self.switch_mode("readahead")
 
     def switch_mode(self, mode):
         """Switch between different modes"""
@@ -132,6 +139,11 @@ class BringupToolGUI:
             self.status_var.set(
                 "Mode: Parse - Calculate library size"
             )
+        elif mode == "readahead":
+            self.readahead_tab.show()
+            self.status_var.set(
+                "Mode: Readahead - Configure workspaces and libraries for rscmgr.rc modification"
+            )
 
     def on_clear(self):
         """Clear all input fields based on current mode"""
@@ -141,6 +153,8 @@ class BringupToolGUI:
             self.tuning_tab.clear_all()
         elif self.current_mode.get() == "parse":
             self.parse_tab.clear_all()
+        elif self.current_mode.get() == "readahead":
+            self.readahead_tab.clear_all()
 
     def run(self):
         """Start the GUI main loop"""

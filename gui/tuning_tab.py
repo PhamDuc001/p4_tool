@@ -1,6 +1,7 @@
 """
 Enhanced Tuning tab implementation with REL path support and property comparison
 Handles the tuning mode UI and functionality including property management for 3 paths
+Updated with auto-resolve functionality
 """
 
 import tkinter as tk
@@ -13,7 +14,7 @@ from gui.comparison_dialog import ComparisonDialog  # New dialog for property co
 
 
 class TuningTab:
-    """Enhanced Tuning tab component with REL path support"""
+    """Enhanced Tuning tab component with REL path support and auto-resolve"""
 
     def __init__(self, parent, gui_utils):
         self.parent = parent
@@ -72,7 +73,7 @@ class TuningTab:
         )
         self.load_properties_btn.pack(side="left", padx=(0, 10))
 
-        # Apply Tuning button - Enhanced with 3-path support
+        # Apply Tuning button - Enhanced with 3-path support and auto-resolve
         self.apply_tuning_btn = ttk.Button(
             control_frame,
             text="Apply to All Paths",
@@ -368,7 +369,7 @@ class TuningTab:
         )
 
     def on_apply_tuning(self):
-        """Handle apply tuning button click - Enhanced for 3 paths"""
+        """Handle apply tuning button click - Enhanced for 3 paths with auto-resolve"""
         if not self.loaded_properties or "_metadata" not in self.loaded_properties:
             messagebox.showerror(
                 "No Data", "Please load properties first before applying changes."
@@ -386,28 +387,56 @@ class TuningTab:
             )
             return
 
-        # Show changes summary
-        changes_summary = self._get_changes_summary(current_properties)
-        if changes_summary:
-            confirm_message = (
-                f"The following changes will be applied to ALL PATHS:\n\n{changes_summary}\n\n"
-            )
-            confirm_message += "This will apply all property changes to BENI, FLUMEN, and REL files and create a pending changelist.\n\n"
+        # Get depot paths - may need auto-resolve
+        original_depot_paths = self.loaded_properties["_metadata"]["depot_paths"]
+        
+        # Check if we need to auto-resolve additional paths
+        needs_auto_resolve = len(original_depot_paths) == 1
+        
+        if needs_auto_resolve:
+            # Show confirmation with auto-resolve info
+            single_path = list(original_depot_paths.keys())[0]
+            confirm_message = f"You loaded properties from {single_path} only.\n\n"
+            
+            if single_path == "REL":
+                confirm_message += "Auto-resolve will find FLUMEN and BENI paths using integration history.\n"
+                confirm_message += "Changes will be applied to: REL → FLUMEN → BENI\n\n"
+            elif single_path == "FLUMEN":
+                confirm_message += "Auto-resolve will find BENI path using integration history.\n"
+                confirm_message += "Changes will be applied to: FLUMEN → BENI\n\n"
+            else:  # BENI
+                confirm_message += "No auto-resolve needed for BENI.\n"
+                confirm_message += "Changes will be applied to: BENI only\n\n"
+            
+            # Show changes summary
+            changes_summary = self._get_changes_summary(current_properties)
+            if changes_summary:
+                confirm_message += f"Changes to apply:\n{changes_summary}\n\n"
+            
             confirm_message += "Do you want to continue?"
-
-            if not messagebox.askyesno("Confirm Apply Changes", confirm_message):
+            
+            if not messagebox.askyesno("Confirm Apply with Auto-Resolve", confirm_message):
                 return
+        else:
+            # Multiple paths loaded - standard confirmation
+            changes_summary = self._get_changes_summary(current_properties)
+            if changes_summary:
+                confirm_message = (
+                    f"The following changes will be applied to ALL PATHS:\n\n{changes_summary}\n\n"
+                )
+                confirm_message += "This will apply all property changes to BENI, FLUMEN, and REL files and create a pending changelist.\n\n"
+                confirm_message += "Do you want to continue?"
 
-        self._run_apply_tuning_enhanced(current_properties)
+                if not messagebox.askyesno("Confirm Apply Changes", confirm_message):
+                    return
 
-    def _run_apply_tuning_enhanced(self, current_properties):
-        """Run apply tuning process for 3 paths"""
+        self._run_apply_tuning_enhanced_with_auto_resolve(current_properties, original_depot_paths)
+
+    def _run_apply_tuning_enhanced_with_auto_resolve(self, current_properties, original_depot_paths):
+        """Run apply tuning process with auto-resolve for missing paths"""
         # Clear tuning log and reset progress
         self.gui_utils.clear_text_widget(self.log_text)
         self.gui_utils.reset_progress(self.progress)
-
-        # Get depot paths from metadata
-        depot_paths = self.loaded_properties["_metadata"]["depot_paths"]
 
         # Log P4 configuration info
         client_name = get_client_name()
@@ -423,11 +452,15 @@ class TuningTab:
         def apply_thread():
             try:
                 self.gui_utils.update_status(
-                    "Processing: Applying tuning changes to all paths..."
+                    "Processing: Applying tuning changes with auto-resolve..."
                 )
-                success = apply_tuning_changes_enhanced(
+                
+                # Import auto-resolve function from tuning_process
+                from processes.tuning_process import apply_tuning_changes_enhanced_with_auto_resolve
+                
+                success = apply_tuning_changes_enhanced_with_auto_resolve(
                     current_properties,
-                    depot_paths,
+                    original_depot_paths,
                     self.log_callback,
                     self.progress_callback,
                     self.gui_utils.error_callback,

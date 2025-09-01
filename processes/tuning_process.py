@@ -1,11 +1,13 @@
 """
 Enhanced Tuning process implementation with 3-path support (BENI, FLUMEN, REL)
 Handles property loading, comparison, and applying changes to all 3 paths
+Updated with auto-resolve functionality
 """
 import re
 from core.p4_operations import (
     validate_depot_path, map_single_depot, map_two_depots_silent, 
-    sync_file_silent, create_changelist_silent, checkout_file_silent
+    sync_file_silent, create_changelist_silent, checkout_file_silent,
+    get_integration_source_depot_path
 )
 from core.file_operations import (
     update_properties_in_file, create_backup, extract_properties_from_file
@@ -31,6 +33,215 @@ def map_three_depots_silent(depot1, depot2, depot3):
     new_lines.append(f"\t{depot3}\t//{client_name}/{depot3[2:]}")
     new_spec = "\n".join(new_lines)
     run_cmd("p4 client -i", input_text=new_spec)
+
+def auto_resolve_missing_depot_paths(original_depot_paths, log_callback=None):
+    """
+    Auto-resolve missing depot paths using integration history
+    Returns expanded depot_paths dict with resolved paths
+    """
+    if log_callback:
+        log_callback("[AUTO-RESOLVE] Starting auto-resolve for missing depot paths...")
+    
+    resolved_paths = original_depot_paths.copy()
+    
+    try:
+        # Get the single provided path
+        provided_path_name = list(original_depot_paths.keys())[0]
+        provided_depot_path = original_depot_paths[provided_path_name]
+        
+        if log_callback:
+            log_callback(f"[AUTO-RESOLVE] Starting from {provided_path_name}: {provided_depot_path}")
+        
+        # Case 1: REL provided → resolve FLUMEN → resolve BENI
+        if provided_path_name == "REL":
+            if log_callback:
+                log_callback("[AUTO-RESOLVE] REL → FLUMEN → BENI resolution")
+            
+            # Map and sync REL file
+            map_single_depot(provided_depot_path)
+            sync_file_silent(provided_depot_path)
+            
+            # Get FLUMEN path from REL integration history
+            flumen_path = get_integration_source_depot_path(provided_depot_path, log_callback)
+            if not flumen_path:
+                raise RuntimeError(f"Cannot find integration source for REL: {provided_depot_path}")
+            
+            if not validate_depot_path(flumen_path):
+                raise RuntimeError(f"Integration source does not exist: {flumen_path}")
+            
+            resolved_paths["FLUMEN"] = flumen_path
+            if log_callback:
+                log_callback(f"[AUTO-RESOLVE] Found FLUMEN: {flumen_path}")
+            
+            # Map and sync FLUMEN file
+            map_single_depot(flumen_path)
+            sync_file_silent(flumen_path)
+            
+            # Get BENI path from FLUMEN integration history
+            beni_path = get_integration_source_depot_path(flumen_path, log_callback)
+            if not beni_path:
+                raise RuntimeError(f"Cannot find integration source for FLUMEN: {flumen_path}")
+            
+            if not validate_depot_path(beni_path):
+                raise RuntimeError(f"Integration source does not exist: {beni_path}")
+            
+            resolved_paths["BENI"] = beni_path
+            if log_callback:
+                log_callback(f"[AUTO-RESOLVE] Found BENI: {beni_path}")
+                
+        # Case 2: FLUMEN provided → resolve BENI
+        elif provided_path_name == "FLUMEN":
+            if log_callback:
+                log_callback("[AUTO-RESOLVE] FLUMEN → BENI resolution")
+            
+            # Map and sync FLUMEN file
+            map_single_depot(provided_depot_path)
+            sync_file_silent(provided_depot_path)
+            
+            # Get BENI path from FLUMEN integration history
+            beni_path = get_integration_source_depot_path(provided_depot_path, log_callback)
+            if not beni_path:
+                raise RuntimeError(f"Cannot find integration source for FLUMEN: {provided_depot_path}")
+            
+            if not validate_depot_path(beni_path):
+                raise RuntimeError(f"Integration source does not exist: {beni_path}")
+            
+            resolved_paths["BENI"] = beni_path
+            if log_callback:
+                log_callback(f"[AUTO-RESOLVE] Found BENI: {beni_path}")
+                
+        # Case 3: BENI provided → no resolution needed
+        elif provided_path_name == "BENI":
+            if log_callback:
+                log_callback("[AUTO-RESOLVE] BENI provided - no resolution needed")
+        
+        # Log final resolved paths
+        if log_callback:
+            log_callback("[AUTO-RESOLVE] Final resolved paths:")
+            for path_name, depot_path in resolved_paths.items():
+                log_callback(f"[RESOLVED] {path_name}: {depot_path}")
+        
+        return resolved_paths
+        
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[AUTO-RESOLVE ERROR] {str(e)}")
+            log_callback("[FALLBACK] Using original paths without auto-resolve")
+        return original_depot_paths
+
+def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original_depot_paths, 
+                                                   log_callback, progress_callback=None, error_callback=None):
+    """Apply property changes to all target files with auto-resolve for missing paths"""
+    try:
+        # Remove metadata if present
+        properties_to_apply = {}
+        for key, value in current_properties.items():
+            if key != "_metadata":
+                properties_to_apply[key] = value
+        
+        log_callback("[TUNING] Starting apply tuning changes with auto-resolve...")
+        
+        # Count properties for logging
+        total_lmkd = len(properties_to_apply.get("LMKD", {}))
+        total_chimera = len(properties_to_apply.get("Chimera", {}))
+        log_callback(f"[INFO] Properties to apply: LMKD={total_lmkd}, Chimera={total_chimera}")
+        
+        if progress_callback:
+            progress_callback(5)
+        
+        # Auto-resolve missing paths if only one path provided
+        if len(original_depot_paths) == 1:
+            log_callback("[AUTO-RESOLVE] Single path detected - performing auto-resolve...")
+            resolved_depot_paths = auto_resolve_missing_depot_paths(original_depot_paths, log_callback)
+        else:
+            log_callback("[INFO] Multiple paths provided - skipping auto-resolve")
+            resolved_depot_paths = original_depot_paths
+        
+        if progress_callback:
+            progress_callback(15)
+        
+        # Create changelist for modifications
+        log_callback("[STEP 1] Creating pending changelist for tuning changes...")
+        changelist_id = create_changelist_silent("Tuning - Apply property changes to all paths")
+        log_callback(f"[OK] Created changelist {changelist_id}")
+        
+        if progress_callback:
+            progress_callback(25)
+        
+        # Map all depot paths
+        depot_paths_list = list(resolved_depot_paths.values())
+        if len(depot_paths_list) == 1:
+            map_single_depot(depot_paths_list[0])
+        elif len(depot_paths_list) == 2:
+            map_two_depots_silent(depot_paths_list[0], depot_paths_list[1])
+        elif len(depot_paths_list) == 3:
+            map_three_depots_silent(depot_paths_list[0], depot_paths_list[1], depot_paths_list[2])
+        
+        # Process each target file
+        processed_files = []
+        progress_step = 60 // len(resolved_depot_paths)  # Divide remaining progress
+        
+        for i, (path_name, depot_path) in enumerate(resolved_depot_paths.items()):
+            try:
+                log_callback(f"[STEP 2.{i+1}] Processing {path_name} file...")
+                
+                # Sync latest version
+                sync_file_silent(depot_path)
+                log_callback(f"[OK] Synced latest version of {path_name}")
+                
+                if progress_callback:
+                    progress_callback(25 + (i + 1) * progress_step)
+                
+                # Checkout for editing
+                checkout_file_silent(depot_path, changelist_id)
+                log_callback(f"[OK] Checked out {path_name} for editing")
+                
+                # Get local path and apply changes
+                local_path = depot_to_local_path(depot_path)
+                
+                # Log what will be applied
+                log_callback(f"[DEBUG] Applying properties to {path_name}:")
+                for category, props in properties_to_apply.items():
+                    if props:
+                        log_callback(f"[DEBUG]   {category}: {len(props)} properties")
+                
+                success, error_msg = update_properties_in_file(local_path, properties_to_apply)
+                
+                if success:
+                    log_callback(f"[OK] Applied tuning changes to {path_name}.")
+                    processed_files.append(path_name)
+                else:
+                    log_callback(f"[ERROR] Failed to apply changes to {path_name}: {error_msg}")
+                    if error_callback:
+                        error_callback("Apply Error", f"Failed to apply changes to {path_name}: {error_msg}")
+                    return False
+                
+            except Exception as e:
+                log_callback(f"[ERROR] Error processing {path_name}: {str(e)}")
+                if error_callback:
+                    error_callback("Processing Error", f"Error processing {path_name}: {str(e)}")
+                return False
+        
+        if progress_callback:
+            progress_callback(100)
+        
+        log_callback(f"[SUCCESS] Tuning changes applied successfully to: {', '.join(processed_files)}")
+        log_callback(f"[INFO] Changelist {changelist_id} contains all modifications for all paths")
+        
+        # Log auto-resolve summary if it was used
+        if len(original_depot_paths) == 1:
+            original_path = list(original_depot_paths.keys())[0]
+            log_callback(f"[SUMMARY] Auto-resolved from {original_path} to {len(processed_files)} files")
+        
+        log_callback(f"[INFO] All properties have been synchronized across {len(processed_files)} files")
+        
+        return True
+        
+    except Exception as e:
+        log_callback(f"[ERROR] Apply tuning changes failed: {str(e)}")
+        if error_callback:
+            error_callback("Apply Tuning Error", str(e))
+        return False
 
 def load_properties_for_tuning_enhanced(beni_depot_path, flumen_depot_path, rel_depot_path,
                                        progress_callback=None, error_callback=None, info_callback=None):
@@ -135,100 +346,9 @@ def load_properties_for_tuning_enhanced(beni_depot_path, flumen_depot_path, rel_
 
 def apply_tuning_changes_enhanced(current_properties, depot_paths_dict, 
                                  log_callback, progress_callback=None, error_callback=None):
-    """Apply property changes to all target files (BENI, FLUMEN, REL)"""
-    try:
-        # Remove metadata if present
-        properties_to_apply = {}
-        for key, value in current_properties.items():
-            if key != "_metadata":
-                properties_to_apply[key] = value
-        
-        log_callback("[TUNING] Starting apply tuning changes to all paths...")
-        
-        # Count properties for logging
-        total_lmkd = len(properties_to_apply.get("LMKD", {}))
-        total_chimera = len(properties_to_apply.get("Chimera", {}))
-        log_callback(f"[INFO] Properties to apply: LMKD={total_lmkd}, Chimera={total_chimera}")
-        
-        if progress_callback:
-            progress_callback(10)
-        
-        # Create changelist for modifications
-        log_callback("[STEP 1] Creating pending changelist for tuning changes...")
-        changelist_id = create_changelist_silent("Tuning - Apply property changes to all paths")
-        log_callback(f"[OK] Created changelist {changelist_id}")
-        
-        if progress_callback:
-            progress_callback(20)
-        
-        # Map all depot paths
-        depot_paths_list = list(depot_paths_dict.values())
-        if len(depot_paths_list) == 1:
-            map_single_depot(depot_paths_list[0])
-        elif len(depot_paths_list) == 2:
-            map_two_depots_silent(depot_paths_list[0], depot_paths_list[1])
-        elif len(depot_paths_list) == 3:
-            map_three_depots_silent(depot_paths_list[0], depot_paths_list[1], depot_paths_list[2])
-        
-        # Process each target file
-        processed_files = []
-        progress_step = 60 // len(depot_paths_dict)  # Divide remaining progress
-        
-        for i, (path_name, depot_path) in enumerate(depot_paths_dict.items()):
-            try:
-                log_callback(f"[STEP 2.{i+1}] Processing {path_name} file...")
-                
-                # Sync latest version
-                sync_file_silent(depot_path)
-                log_callback(f"[OK] Synced latest version of {path_name}")
-                
-                if progress_callback:
-                    progress_callback(20 + (i + 1) * progress_step)
-                
-                # Checkout for editing
-                checkout_file_silent(depot_path, changelist_id)
-                log_callback(f"[OK] Checked out {path_name} for editing")
-                
-                # Get local path and apply changes
-                local_path = depot_to_local_path(depot_path)
-                
-                # Log what will be applied
-                log_callback(f"[DEBUG] Applying properties to {path_name}:")
-                for category, props in properties_to_apply.items():
-                    if props:
-                        log_callback(f"[DEBUG]   {category}: {len(props)} properties")
-                
-                success, error_msg = update_properties_in_file(local_path, properties_to_apply)
-                
-                if success:
-                    log_callback(f"[OK] Applied tuning changes to {path_name}.")
-                    processed_files.append(path_name)
-                else:
-                    log_callback(f"[ERROR] Failed to apply changes to {path_name}: {error_msg}")
-                    if error_callback:
-                        error_callback("Apply Error", f"Failed to apply changes to {path_name}: {error_msg}")
-                    return False
-                
-            except Exception as e:
-                log_callback(f"[ERROR] Error processing {path_name}: {str(e)}")
-                if error_callback:
-                    error_callback("Processing Error", f"Error processing {path_name}: {str(e)}")
-                return False
-        
-        if progress_callback:
-            progress_callback(100)
-        
-        log_callback(f"[SUCCESS] Tuning changes applied successfully to: {', '.join(processed_files)}")
-        log_callback(f"[INFO] Changelist {changelist_id} contains all modifications for all paths")
-        log_callback(f"[INFO] All properties have been synchronized across {len(processed_files)} files")
-        
-        return True
-        
-    except Exception as e:
-        log_callback(f"[ERROR] Apply tuning changes failed: {str(e)}")
-        if error_callback:
-            error_callback("Apply Tuning Error", str(e))
-        return False
+    """Apply property changes to all target files (BENI, FLUMEN, REL) - legacy function"""
+    return apply_tuning_changes_enhanced_with_auto_resolve(current_properties, depot_paths_dict, 
+                                                          log_callback, progress_callback, error_callback)
 
 # Keep original functions for backward compatibility
 def load_properties_for_tuning(beni_depot_path, flumen_depot_path, 
@@ -335,8 +455,8 @@ def load_properties_for_tuning(beni_depot_path, flumen_depot_path,
 def apply_tuning_changes(current_properties, original_depot_paths, 
                         log_callback, progress_callback=None, error_callback=None):
     """Legacy function - apply changes to original depot paths"""
-    return apply_tuning_changes_enhanced(current_properties, original_depot_paths, 
-                                       log_callback, progress_callback, error_callback)
+    return apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original_depot_paths, 
+                                                          log_callback, progress_callback, error_callback)
 
 # Utility functions
 def extract_properties_from_file(file_path):

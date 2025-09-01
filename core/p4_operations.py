@@ -1,7 +1,7 @@
 """
 P4 command operations
 Handles all Perforce commands and validations
-Enhanced with auto-resolve cascading functionality
+Enhanced with auto-resolve cascading functionality - FIXED VERSION
 """
 import subprocess
 import re
@@ -14,7 +14,8 @@ __all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'validate_device
            'map_single_depot', 'map_two_depots_silent', 'sync_file', 'sync_file_silent', 
            'checkout_file', 'checkout_file_silent', 'is_workspace_like', 
            'resolve_workspace_to_device_common_path', 'resolve_user_input_to_depot_path',
-           'auto_resolve_missing_branches', 'get_integration_source']
+           'auto_resolve_missing_branches', 'get_integration_source_depot_path',
+           'find_device_common_mk_from_workspace']
 
 def run_cmd(cmd, input_text=None):
     """Execute command and return output"""
@@ -187,12 +188,7 @@ def is_workspace_like(user_input: str) -> bool:
     return user_input.strip().upper().startswith("TEMPLATE")
 
 def _parse_view_left_depots_from_text(spec_text: str) -> List[str]:
-    """Parse `p4 client -o <name>` output text and return list of left depot mappings.
-
-    Lines under the `View:` section typically look like:
-        \t//depot/path/... //clientName/depot/path/...
-    This extracts the left (depot) side for all mappings.
-    """
+    """Parse `p4 client -o <name>` output text and return list of left depot mappings."""
     lines = spec_text.splitlines()
     depots: List[str] = []
     in_view = False
@@ -201,27 +197,20 @@ def _parse_view_left_depots_from_text(spec_text: str) -> List[str]:
             if line.strip().startswith("View:"):
                 in_view = True
             continue
-        # In view block: indented lines until a non-indented header
         if line.startswith("\t") or line.startswith("    "):
             parts = line.strip().split()
             if not parts:
                 continue
-            # Expect at least two columns: <//depot/...> <//client/...>
             left = parts[0]
             if left.startswith("//"):
                 depots.append(left)
         else:
-            # End of View section
             if in_view:
                 break
     return depots
 
 def _parse_view_left_depots_from_dict(spec: dict) -> List[str]:
-    """Parse spec dict returned by P4Python fetch_client.
-
-    spec.get('View') is usually a list of strings with two columns.
-    Return the left depot paths.
-    """
+    """Parse spec dict returned by P4Python fetch_client."""
     depots: List[str] = []
     view = spec.get("View")
     if isinstance(view, list):
@@ -236,56 +225,100 @@ def _parse_view_left_depots_from_dict(spec: dict) -> List[str]:
 
 def _extract_device_common_from_depots(left_depots: List[str]) -> Optional[str]:
     """From a list of left depot mappings, find a `device/<model>_common/` segment and
-    build the device_common.mk depot file path.
-
-    Returns the first valid depot path found, or None.
-    """
+    build the device_common.mk depot file path."""
     for left in left_depots:
-        # Find a segment ending with /device/<model>_common/
         match = _DEVICE_COMMON_REGEX.search(left)
         if not match:
             continue
-        base_vendor_dir = match.group(1)  # path before /device
-        # Derive model from the last folder name of base_vendor_dir (e.g., a07_vendor -> a07)
+        base_vendor_dir = match.group(1)
         last_segment = base_vendor_dir.rstrip("/").split("/")[-1]
         model = last_segment.split("_")[0] if "_" in last_segment else last_segment
         candidate = f"{base_vendor_dir}/device/{model}_common/device_common.mk"
-        # Validate existence quickly via p4 files
         if validate_depot_path(candidate):
             return candidate
     return None
 
-def resolve_workspace_to_device_common_path(workspace_name: str) -> str:
-    """Resolve TEMPLATE_* workspace to the depot path of device_common.mk.
+def find_device_common_mk_from_workspace(workspace_name, log_callback=None):
+    """
+    Enhanced workspace resolution using parse_process.py approach
+    Find device_common.mk path from workspace name using P4Python
+    """
+    if log_callback:
+        log_callback(f"[WORKSPACE] Resolving workspace to device_common.mk: {workspace_name}")
+    
+    try:
+        from P4 import P4, P4Exception
+        p4 = P4()
+        try:
+            p4.connect()
+            
+            # Get client spec information
+            client_spec = p4.fetch_client("-o", workspace_name)
+            
+            # Regex pattern to find device_common.mk paths
+            # Pattern looks for: //depot_name/*/device/*_common/
+            pattern = re.compile(r"(^[^.]+?/)device/[^/]+?_common/")
+            
+            # Search in View mappings
+            found_paths = []
+            for view in client_spec.get('View', []):
+                # Get depot path (left side of mapping)
+                depot_path = view.split()[0] if isinstance(view, str) else view[0]
+                match = pattern.search(depot_path)
+                if match:
+                    # Remove "..." at the end and add "device_common.mk"
+                    clean_path = depot_path.rstrip('...')
+                    complete_path = clean_path + "device_common.mk"
+                    found_paths.append(complete_path)
+            
+            # Return first valid path
+            if found_paths:
+                result_path = found_paths[0]
+                if validate_depot_path(result_path):
+                    if log_callback:
+                        log_callback(f"[OK] Resolved workspace to: {result_path}")
+                    return result_path
+            
+            return None
+            
+        finally:
+            try:
+                p4.disconnect()
+            except:
+                pass
+    except Exception:
+        pass
+    
+    # Fallback to CLI approach if P4Python fails
+    if log_callback:
+        log_callback("[FALLBACK] Using CLI approach for workspace resolution...")
+    
+    result = subprocess.run(f"p4 client -o {workspace_name}", capture_output=True, text=True, shell=True)
+    if result.returncode != 0:
+        return None
 
-    Tries P4Python first; falls back to `p4 client -o <workspace_name>` parsing.
-    Raises RuntimeError if not found or invalid.
+    left_depots = _parse_view_left_depots_from_text(result.stdout)
+    depot_path = _extract_device_common_from_depots(left_depots)
+    return depot_path
+
+def resolve_workspace_to_device_common_path(workspace_name: str) -> str:
+    """
+    Enhanced: Use parse_process.py approach for workspace resolution
+    Resolve TEMPLATE_* workspace to the depot path of device_common.mk.
     """
     workspace_name = workspace_name.strip()
     if not workspace_name:
         raise RuntimeError("Workspace name is empty.")
 
-    # Try P4Python if available
+    # Try enhanced P4Python approach first
     try:
-        from P4 import P4, P4Exception  # type: ignore
-        p4 = P4()
-        try:
-            p4.connect()
-            spec = p4.fetch_client(workspace_name)
-            left_depots = _parse_view_left_depots_from_dict(spec)
-            depot_path = _extract_device_common_from_depots(left_depots)
-            if depot_path:
-                return depot_path
-        finally:
-            try:
-                p4.disconnect()
-            except Exception:
-                pass
+        result_path = find_device_common_mk_from_workspace(workspace_name)
+        if result_path and validate_depot_path(result_path):
+            return result_path
     except Exception:
-        # P4Python not available or failed; fallback to CLI
         pass
-
-    # Fallback: CLI fetch
+    
+    # Fallback to CLI approach
     result = subprocess.run(f"p4 client -o {workspace_name}", capture_output=True, text=True, shell=True)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to fetch workspace '{workspace_name}': {result.stderr.strip()}")
@@ -313,52 +346,56 @@ def resolve_user_input_to_depot_path(user_input: str) -> str:
     return text
 
 # =====================================================================================
-# AUTO-RESOLVE CASCADING FUNCTIONALITY
+# AUTO-RESOLVE CASCADING FUNCTIONALITY - FIXED IMPLEMENTATION
 # =====================================================================================
 
-def get_integration_source(depot_path: str) -> Optional[str]:
+def get_integration_source_depot_path(depot_path: str, log_callback) -> Optional[str]:
     """
-    Get integration source from p4 filelog -i -m 1
-    Parse integration history and return source depot path
+    FIXED: Get integration source depot path from p4 filelog version #1
+    Parse integration history and return source depot path from "branch from" line
     Returns None if no integration source found or parsing failed
     """
     try:
-        # Run p4 filelog command to get integration history
-        result = subprocess.run(
-            f"p4 filelog -i -m 1 {depot_path}", 
-            capture_output=True, text=True, shell=True
-        )
+        # FIXED COMMAND: Use #1 to get the first version (integration source)
+        cmd = f"p4 filelog -i {depot_path}#1"
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         
         if result.returncode != 0:
+            if log_callback:
+                log_callback(f"[WARNING] P4 filelog command failed for {depot_path}#1")
             return None
         
         output = result.stdout.strip()
         if not output:
+            if log_callback:
+                log_callback(f"[WARNING] Empty filelog output for {depot_path}#1")
             return None
         
-        # Parse integration history
-        # Expected format: ... integration from //depot/path/...#version,#version
+        # FIXED PARSING: Look for "... ... branch from <path>#<version>" pattern
         lines = output.split('\n')
         for line in lines:
             line = line.strip()
-            if 'integration from' in line:
-                # Extract source path using regex
-                # Pattern: integration from //depot/path/...#version,#version
-                # or: integration from //depot/path/...#version
-                match = re.search(r'integration from (//[^#]+)', line)
-                if match:
-                    source_path = match.group(1).strip()
-                    return source_path
-        
+            if line.startswith("... ... branch from "):
+                # Extract path from "... ... branch from //path/device_common.mk#1"
+                # Remove "... ... branch from " prefix and "#<version>" suffix
+                source_path = line[len("... ... branch from "):].split('#')[0]
+                if log_callback:
+                    log_callback(f"[PARSE] Extracted integration source: {source_path}")
+                return source_path
+                
+        if log_callback:
+            log_callback(f"[WARNING] No 'branch from' line found in filelog output for {depot_path}#1")
         return None
         
-    except Exception:
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Error getting integration source: {str(e)}")
         return None
 
 def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_input: str, 
                                  rel_input: str, log_callback) -> Tuple[str, str, str, str]:
     """
-    Auto-resolve missing branches from integration history
+    Auto-resolve missing branches from integration history with FIXED parsing logic
     
     Args:
         vince_input: VINCE input (workspace or depot path) - mandatory
@@ -371,10 +408,10 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
         Tuple: (resolved_beni, resolved_flumen, resolved_rel, resolved_vince)
     
     Auto-resolve Logic Matrix:
-    - VINCE + FLUMEN (BENI empty) → Auto-resolve BENI from FLUMEN
-    - VINCE + REL (FLUMEN + BENI empty) → Auto-resolve FLUMEN from REL → Auto-resolve BENI from FLUMEN  
-    - VINCE + FLUMEN + REL (BENI empty) → Auto-resolve BENI from FLUMEN
-    - Full input (4 fields) → Process normally, no auto-resolve
+    - VINCE + FLUMEN (BENI empty) â†’ Auto-resolve BENI from FLUMEN
+    - VINCE + REL (FLUMEN + BENI empty) â†’ Auto-resolve FLUMEN from REL â†’ Auto-resolve BENI from FLUMEN  
+    - VINCE + FLUMEN + REL (BENI empty) â†’ Auto-resolve BENI from FLUMEN
+    - Full input (4 fields) â†’ Process normally, no auto-resolve
     """
     
     # Normalize inputs
@@ -401,9 +438,9 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
     
     try:
         # Case 1: VINCE + REL provided, but FLUMEN + BENI empty
-        # Auto-resolve: REL → FLUMEN → BENI (cascading)
+        # Auto-resolve: REL â†’ FLUMEN â†’ BENI (cascading)
         if vince_input and rel_input and not flumen_input and not beni_input:
-            log_callback("[AUTO-RESOLVE] Case detected: VINCE + REL → Auto-resolve FLUMEN and BENI")
+            log_callback("[AUTO-RESOLVE] Case detected: VINCE + REL â†’ Auto-resolve FLUMEN and BENI")
             
             # Step 1: Resolve REL to depot path and sync
             rel_depot_path = resolve_user_input_to_depot_path(rel_input)
@@ -415,7 +452,7 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
             sync_file_silent(rel_depot_path)
             
             # Step 2: Get integration source for FLUMEN from REL
-            flumen_source = get_integration_source(rel_depot_path)
+            flumen_source = get_integration_source_depot_path(rel_depot_path, log_callback)
             if not flumen_source:
                 raise RuntimeError(f"No integration history found for REL: {rel_depot_path}")
             
@@ -431,7 +468,7 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
             map_single_depot(flumen_source)
             sync_file_silent(flumen_source)
             
-            beni_source = get_integration_source(flumen_source)
+            beni_source = get_integration_source_depot_path(flumen_source, log_callback)
             if not beni_source:
                 raise RuntimeError(f"No integration history found for FLUMEN: {flumen_source}")
             
@@ -443,9 +480,9 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
             log_callback(f"[AUTO] Detected BENI from FLUMEN: {beni_source}")
         
         # Case 2: VINCE + FLUMEN provided, but BENI empty (REL may or may not be provided)
-        # Auto-resolve: FLUMEN → BENI
+        # Auto-resolve: FLUMEN â†’ BENI
         elif vince_input and flumen_input and not beni_input:
-            log_callback("[AUTO-RESOLVE] Case detected: VINCE + FLUMEN → Auto-resolve BENI")
+            log_callback("[AUTO-RESOLVE] Case detected: VINCE + FLUMEN â†’ Auto-resolve BENI")
             
             # Step 1: Resolve FLUMEN to depot path and sync
             flumen_depot_path = resolve_user_input_to_depot_path(flumen_input)
@@ -457,7 +494,7 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
             sync_file_silent(flumen_depot_path)
             
             # Step 2: Get integration source for BENI from FLUMEN
-            beni_source = get_integration_source(flumen_depot_path)
+            beni_source = get_integration_source_depot_path(flumen_depot_path, log_callback)
             if not beni_source:
                 raise RuntimeError(f"No integration history found for FLUMEN: {flumen_depot_path}")
             
