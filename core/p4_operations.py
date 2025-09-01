@@ -1,12 +1,15 @@
 """
-P4 command operations
+P4 command operations - REFACTORED VERSION
 Handles all Perforce commands and validations
-Enhanced with auto-resolve cascading functionality - FIXED VERSION
+Enhanced with centralized utilities and reduced code duplication
 """
 import subprocess
 import re
 from typing import List, Optional, Tuple
 from config.p4_config import get_client_name
+from core.core_utils import (
+    get_client_mapper, get_path_validator, get_auto_resolver
+)
 
 # Export the function for use by other modules  
 __all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'validate_device_common_mk_path',
@@ -19,40 +22,28 @@ __all__ = ['get_client_name', 'run_cmd', 'validate_depot_path', 'validate_device
 
 def run_cmd(cmd, input_text=None):
     """Execute command and return output"""
-    result = subprocess.run(cmd, input=input_text, capture_output=True, text=True, shell=True)
+    result = subprocess.run(cmd, input_text=input_text, capture_output=True, text=True, shell=True)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed: {cmd}\n{result.stderr}")
     return result.stdout.strip()
 
+# Delegate to centralized utilities
 def validate_depot_path(depot_path):
     """Validate if depot path exists in Perforce"""
-    try:
-        result = subprocess.run(f"p4 files {depot_path}", capture_output=True, text=True, shell=True)
-        if result.returncode != 0 or "no such file" in result.stderr.lower():
-            return False
-        return True
-    except:
-        return False
+    return get_path_validator().validate_depot_path(depot_path)
 
 def validate_device_common_mk_path(depot_path):
     """
     Validate if depot path exists and is a device_common.mk file
     Returns (exists, is_device_common_mk)
     """
-    try:
-        # Check if path exists
-        result = subprocess.run(f"p4 files {depot_path}", capture_output=True, text=True, shell=True)
-        if result.returncode != 0 or "no such file" in result.stderr.lower():
-            return False, False
-        
-        # Check if it's a device_common.mk file
-        is_device_common = depot_path.endswith("/device_common.mk")
-        
-        return True, is_device_common
-        
-    except:
-        return False, False
+    return get_path_validator().validate_device_common_mk_path(depot_path)
 
+def is_workspace_like(user_input: str) -> bool:
+    """Return True if the input string looks like a P4 workspace template name."""
+    return get_path_validator().is_workspace_like(user_input)
+
+# Changelist operations
 def create_changelist(log_callback):
     """Create pending changelist"""
     log_callback("[STEP 1] Creating pending changelist...")
@@ -71,90 +62,24 @@ def create_changelist_silent(description="Auto changelist"):
     changelist_id = re.search(r"Change (\d+)", changelist_result).group(1)
     return changelist_id
 
+# Client mapping operations - delegated to centralized mapper
 def map_client(beni_depot, vince_depot, flumen_depot, log_callback):
     """Map multiple depots to client spec"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    log_callback("[STEP 2] Mapping BENI, VINCE and FLUMEN to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if beni_depot in line or vince_depot in line or flumen_depot in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{beni_depot}\t//{client_name}/{beni_depot[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_lines.append(f"\t{flumen_depot}\t//{client_name}/{flumen_depot[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
+    get_client_mapper().map_depots([beni_depot, vince_depot, flumen_depot], log_callback)
 
 def map_client_two_paths(target_depot, vince_depot, log_callback):
     """Map two depots to client spec"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    target_name = "BENI" if "beni" in target_depot.lower() else "FLUMEN" if "flumen" in target_depot.lower() else "TARGET"
-    log_callback(f"[STEP 2] Mapping {target_name} and VINCE to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if target_depot in line or vince_depot in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{target_depot}\t//{client_name}/{target_depot[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
+    get_client_mapper().map_two_depots(target_depot, vince_depot, log_callback)
 
 def map_single_depot(depot_path, log_callback=None):
     """Map single depot to client spec"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    depot_name = "BENI" if "beni" in depot_path.lower() else "FLUMEN" if "flumen" in depot_path.lower() else "DEPOT"
-    if log_callback:
-        log_callback(f"[MAPPING] Mapping {depot_name} to client spec...")
-    
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot_path in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot_path}\t//{client_name}/{depot_path[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    
-    if log_callback:
-        log_callback("[OK] Mapping completed.")
+    get_client_mapper().map_single_depot(depot_path, log_callback)
 
 def map_two_depots_silent(depot1, depot2):
     """Map two depots to client spec without logging"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot1 in line or depot2 in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot1}\t//{client_name}/{depot1[2:]}")
-    new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
+    get_client_mapper().map_two_depots(depot1, depot2, silent=True)
 
+# File operations
 def sync_file(depot_path, log_callback):
     """Sync file from depot"""
     log_callback(f"[SYNC] Syncing {depot_path}...")
@@ -180,12 +105,6 @@ def checkout_file_silent(depot_path, changelist_id):
 # =====================================================================================
 
 _DEVICE_COMMON_REGEX = re.compile(r"^(.+?)/device/([^/]+?)_common/", re.IGNORECASE)
-
-def is_workspace_like(user_input: str) -> bool:
-    """Return True if the input string looks like a P4 workspace template name."""
-    if not user_input:
-        return False
-    return user_input.strip().upper().startswith("TEMPLATE")
 
 def _parse_view_left_depots_from_text(spec_text: str) -> List[str]:
     """Parse `p4 client -o <name>` output text and return list of left depot mappings."""
@@ -346,56 +265,21 @@ def resolve_user_input_to_depot_path(user_input: str) -> str:
     return text
 
 # =====================================================================================
-# AUTO-RESOLVE CASCADING FUNCTIONALITY - FIXED IMPLEMENTATION
+# AUTO-RESOLVE CASCADING FUNCTIONALITY - REFACTORED
 # =====================================================================================
 
 def get_integration_source_depot_path(depot_path: str, log_callback) -> Optional[str]:
     """
-    FIXED: Get integration source depot path from p4 filelog version #1
-    Parse integration history and return source depot path from "branch from" line
-    Returns None if no integration source found or parsing failed
+    Get integration source depot path from p4 filelog version #1
+    Delegated to centralized auto resolver
     """
-    try:
-        # FIXED COMMAND: Use #1 to get the first version (integration source)
-        cmd = f"p4 filelog -i {depot_path}#1"
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        
-        if result.returncode != 0:
-            if log_callback:
-                log_callback(f"[WARNING] P4 filelog command failed for {depot_path}#1")
-            return None
-        
-        output = result.stdout.strip()
-        if not output:
-            if log_callback:
-                log_callback(f"[WARNING] Empty filelog output for {depot_path}#1")
-            return None
-        
-        # FIXED PARSING: Look for "... ... branch from <path>#<version>" pattern
-        lines = output.split('\n')
-        for line in lines:
-            line = line.strip()
-            if line.startswith("... ... branch from "):
-                # Extract path from "... ... branch from //path/device_common.mk#1"
-                # Remove "... ... branch from " prefix and "#<version>" suffix
-                source_path = line[len("... ... branch from "):].split('#')[0]
-                if log_callback:
-                    log_callback(f"[PARSE] Extracted integration source: {source_path}")
-                return source_path
-                
-        if log_callback:
-            log_callback(f"[WARNING] No 'branch from' line found in filelog output for {depot_path}#1")
-        return None
-        
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error getting integration source: {str(e)}")
-        return None
+    return get_auto_resolver().get_integration_source_depot_path(depot_path, log_callback)
 
 def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_input: str, 
                                  rel_input: str, log_callback) -> Tuple[str, str, str, str]:
     """
-    Auto-resolve missing branches from integration history with FIXED parsing logic
+    Auto-resolve missing branches from integration history - REFACTORED VERSION
+    Uses centralized auto resolver for consistent behavior
     
     Args:
         vince_input: VINCE input (workspace or depot path) - mandatory
@@ -406,12 +290,6 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
     
     Returns:
         Tuple: (resolved_beni, resolved_flumen, resolved_rel, resolved_vince)
-    
-    Auto-resolve Logic Matrix:
-    - VINCE + FLUMEN (BENI empty) â†’ Auto-resolve BENI from FLUMEN
-    - VINCE + REL (FLUMEN + BENI empty) â†’ Auto-resolve FLUMEN from REL â†’ Auto-resolve BENI from FLUMEN  
-    - VINCE + FLUMEN + REL (BENI empty) â†’ Auto-resolve BENI from FLUMEN
-    - Full input (4 fields) â†’ Process normally, no auto-resolve
     """
     
     # Normalize inputs
@@ -437,73 +315,42 @@ def auto_resolve_missing_branches(vince_input: str, flumen_input: str, beni_inpu
     log_callback(f"[INPUT] REL: {rel_input if rel_input else '(empty)'}")
     
     try:
+        auto_resolver = get_auto_resolver()
+        
         # Case 1: VINCE + REL provided, but FLUMEN + BENI empty
-        # Auto-resolve: REL â†’ FLUMEN â†’ BENI (cascading)
+        # Auto-resolve: REL → FLUMEN → BENI (cascading)
         if vince_input and rel_input and not flumen_input and not beni_input:
-            log_callback("[AUTO-RESOLVE] Case detected: VINCE + REL â†’ Auto-resolve FLUMEN and BENI")
+            log_callback("[AUTO-RESOLVE] Case detected: VINCE + REL → Auto-resolve FLUMEN and BENI")
             
-            # Step 1: Resolve REL to depot path and sync
+            # Resolve REL input to depot path
             rel_depot_path = resolve_user_input_to_depot_path(rel_input)
             if not validate_depot_path(rel_depot_path):
                 raise RuntimeError(f"REL path does not exist: {rel_depot_path}")
             
-            # Map and sync REL to get latest
-            map_single_depot(rel_depot_path)
-            sync_file_silent(rel_depot_path)
+            # Use centralized cascading resolution: REL → FLUMEN → BENI
+            cascading_result = auto_resolver.resolve_cascading_branches(
+                rel_depot_path, ["REL", "FLUMEN", "BENI"], log_callback
+            )
             
-            # Step 2: Get integration source for FLUMEN from REL
-            flumen_source = get_integration_source_depot_path(rel_depot_path, log_callback)
-            if not flumen_source:
-                raise RuntimeError(f"No integration history found for REL: {rel_depot_path}")
-            
-            # Validate FLUMEN source exists
-            if not validate_depot_path(flumen_source):
-                raise RuntimeError(f"Integration source does not exist: {flumen_source}")
-            
-            resolved_flumen = flumen_source
-            log_callback(f"[AUTO] Detected FLUMEN from REL: {flumen_source}")
-            
-            # Step 3: Get integration source for BENI from FLUMEN
-            # Map and sync FLUMEN first
-            map_single_depot(flumen_source)
-            sync_file_silent(flumen_source)
-            
-            beni_source = get_integration_source_depot_path(flumen_source, log_callback)
-            if not beni_source:
-                raise RuntimeError(f"No integration history found for FLUMEN: {flumen_source}")
-            
-            # Validate BENI source exists
-            if not validate_depot_path(beni_source):
-                raise RuntimeError(f"Integration source does not exist: {beni_source}")
-            
-            resolved_beni = beni_source
-            log_callback(f"[AUTO] Detected BENI from FLUMEN: {beni_source}")
+            resolved_flumen = cascading_result.get("FLUMEN")
+            resolved_beni = cascading_result.get("BENI")
         
         # Case 2: VINCE + FLUMEN provided, but BENI empty (REL may or may not be provided)
-        # Auto-resolve: FLUMEN â†’ BENI
+        # Auto-resolve: FLUMEN → BENI
         elif vince_input and flumen_input and not beni_input:
-            log_callback("[AUTO-RESOLVE] Case detected: VINCE + FLUMEN â†’ Auto-resolve BENI")
+            log_callback("[AUTO-RESOLVE] Case detected: VINCE + FLUMEN → Auto-resolve BENI")
             
-            # Step 1: Resolve FLUMEN to depot path and sync
+            # Resolve FLUMEN input to depot path
             flumen_depot_path = resolve_user_input_to_depot_path(flumen_input)
             if not validate_depot_path(flumen_depot_path):
                 raise RuntimeError(f"FLUMEN path does not exist: {flumen_depot_path}")
             
-            # Map and sync FLUMEN to get latest
-            map_single_depot(flumen_depot_path)
-            sync_file_silent(flumen_depot_path)
+            # Use centralized resolution: FLUMEN → BENI
+            cascading_result = auto_resolver.resolve_cascading_branches(
+                flumen_depot_path, ["FLUMEN", "BENI"], log_callback
+            )
             
-            # Step 2: Get integration source for BENI from FLUMEN
-            beni_source = get_integration_source_depot_path(flumen_depot_path, log_callback)
-            if not beni_source:
-                raise RuntimeError(f"No integration history found for FLUMEN: {flumen_depot_path}")
-            
-            # Validate BENI source exists
-            if not validate_depot_path(beni_source):
-                raise RuntimeError(f"Integration source does not exist: {beni_source}")
-            
-            resolved_beni = beni_source
-            log_callback(f"[AUTO] Detected BENI from FLUMEN: {beni_source}")
+            resolved_beni = cascading_result.get("BENI")
         
         # Case 3: All fields provided or no auto-resolve needed
         else:

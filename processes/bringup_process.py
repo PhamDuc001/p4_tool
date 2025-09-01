@@ -1,68 +1,19 @@
 """
-Bringup process implementation
+Bringup process implementation - REFACTORED VERSION
 Main logic for the bringup workflow
-Enhanced to support mixed input (depot paths and workspaces)
-Updated logic: Compare properties first, then create changelist only when needed
+Enhanced with centralized utilities and reduced code duplication
 """
 from core.p4_operations import (
-    validate_depot_path, create_changelist, map_client, 
-    map_client_two_paths, sync_file, checkout_file,
-    resolve_workspace_to_device_common_path, is_workspace_like,
-    sync_file_silent
+    validate_depot_path, create_changelist, 
+    sync_file, checkout_file, resolve_workspace_to_device_common_path, 
+    is_workspace_like, sync_file_silent
 )
 from core.file_operations import (
     validate_properties_exist, update_lmkd_chimera,
     compare_properties_between_files
 )
+from core.core_utils import get_client_mapper
 from config.p4_config import depot_to_local_path
-
-def map_client_four_paths(beni_depot, vince_depot, flumen_depot, rel_depot, log_callback):
-    """Map four depots to client spec"""
-    from core.p4_operations import get_client_name, run_cmd
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    log_callback("[STEP 2] Mapping BENI, VINCE, FLUMEN and REL to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if beni_depot in line or vince_depot in line or flumen_depot in line or rel_depot in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{beni_depot}\t//{client_name}/{beni_depot[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_lines.append(f"\t{flumen_depot}\t//{client_name}/{flumen_depot[2:]}")
-    new_lines.append(f"\t{rel_depot}\t//{client_name}/{rel_depot[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
-
-def map_client_three_paths(depot1, vince_depot, depot2, log_callback):
-    """Map three depots to client spec"""
-    from core.p4_operations import get_client_name, run_cmd
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    depot1_name = "BENI" if "beni" in depot1.lower() else "FLUMEN" if "flumen" in depot1.lower() else "REL" if "rel" in depot1.lower() else "DEPOT1"
-    depot2_name = "BENI" if "beni" in depot2.lower() else "FLUMEN" if "flumen" in depot2.lower() else "REL" if "rel" in depot2.lower() else "DEPOT2"
-    
-    log_callback(f"[STEP 2] Mapping {depot1_name}, VINCE and {depot2_name} to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot1 in line or vince_depot in line or depot2 in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot1}\t//{client_name}/{depot1[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
 
 def resolve_vendor_input_to_depot_path(user_input, log_callback=None):
     """
@@ -133,7 +84,7 @@ def compare_target_with_vince(vince_local_path, target_local_path, target_name, 
 
 def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
                        log_callback, progress_callback=None, error_callback=None):
-    """Execute the complete bringup process - Enhanced with new logic: compare first, then create changelist"""
+    """Execute the complete bringup process - Enhanced with refactored utilities"""
     try:
         # ============================================================================
         # STEP 1: VALIDATE INPUTS
@@ -212,20 +163,14 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
             progress_callback(10)
         
         # ============================================================================
-        # STEP 2: MAP ALL VALID PATHS
+        # STEP 2: MAP ALL VALID PATHS - Using refactored mapper
         # ============================================================================
         target_depot_paths = [target[1] for target in valid_targets]
         all_depot_paths = [vince_depot_path] + target_depot_paths
         
-        # Choose appropriate mapping function based on number of paths
-        if len(all_depot_paths) == 4:  # VINCE + 3 targets
-            map_client_four_paths(target_depot_paths[0], vince_depot_path, 
-                                target_depot_paths[1], target_depot_paths[2], log_callback)
-        elif len(all_depot_paths) == 3:  # VINCE + 2 targets
-            map_client_three_paths(target_depot_paths[0], vince_depot_path, 
-                                 target_depot_paths[1], log_callback)
-        elif len(all_depot_paths) == 2:  # VINCE + 1 target
-            map_client_two_paths(target_depot_paths[0], vince_depot_path, log_callback)
+        # Use centralized client mapper
+        mapper = get_client_mapper()
+        mapper.map_depots(all_depot_paths, log_callback)
         
         if progress_callback: 
             progress_callback(25)
