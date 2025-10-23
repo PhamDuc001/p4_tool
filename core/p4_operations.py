@@ -207,11 +207,11 @@ def map_two_depots_silent(depot1, depot2):
     run_cmd("p4 client -i", input_text=new_spec)
 
 
-# def sync_file(depot_path, log_callback):
-#     """Sync file from depot"""
-#     log_callback(f"[SYNC] Syncing {depot_path}...")
-#     run_cmd(f"p4 sync {depot_path}")
-#     log_callback("[OK] Synced.")
+def sync_file(depot_path, log_callback):
+    """Sync file from depot"""
+    log_callback(f"[SYNC] Syncing {depot_path}...")
+    run_cmd(f"p4 sync {depot_path}")
+    log_callback("[OK] Synced.")
 
 
 def sync_file_silent(depot_path):
