@@ -301,7 +301,7 @@ def create_rscmgr_file(rscmgr_folder_path, rscmgr_filename, source_rscmgr_path,
             copy_rscmgr_file_content(source_rscmgr_path, target_rscmgr_path, log_callback)
         else:
             # Create stub file
-            stub_content = "# rscmgr rc file\n\n"
+            stub_content = "# rscmgr rc file\n"
             with open(target_local, "w", encoding="utf-8") as f:
                 f.write(stub_content)
             if log_callback:
