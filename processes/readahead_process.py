@@ -108,6 +108,50 @@ def construct_rscmgr_file_path(samsung_path, rscmgr_filename):
     """Construct rscmgr file path from samsung base path"""
     return f"{samsung_path}system/rscmgr/{rscmgr_filename}"
 
+def find_rscmgr_file_path(workspace_name, rscmgr_filename, log_callback=None):
+    """
+    Find rscmgr file path in workspace
+    
+    Args:
+        workspace_name: Workspace name (TEMPLATE_*)
+        rscmgr_filename: Name of rscmgr file (e.g., rscmgr.rc)
+        log_callback: Optional logging callback
+    
+    Returns:
+        str: Depot path to rscmgr file, or None if not found
+    """
+    if log_callback:
+        log_callback(f"[SEARCH] Looking for {rscmgr_filename} in workspace: {workspace_name}")
+    
+    try:
+        # Step 1: Find samsung vendor path from workspace
+        samsung_vendor_path = find_samsung_vendor_path(workspace_name, log_callback)
+        
+        if not samsung_vendor_path:
+            if log_callback:
+                log_callback("[ERROR] Cannot find Samsung vendor path")
+            return None
+        
+        # Step 2: Construct rscmgr file path
+        rscmgr_path = construct_rscmgr_file_path(samsung_vendor_path, rscmgr_filename)
+        
+        if log_callback:
+            log_callback(f"[CONSTRUCTED] Rscmgr path: {rscmgr_path}")
+        
+        # Step 3: Validate if file exists
+        if validate_depot_path(rscmgr_path):
+            if log_callback:
+                log_callback(f"[FOUND] {rscmgr_filename} file exists: {rscmgr_path}")
+            return rscmgr_path
+        else:
+            if log_callback:
+                log_callback(f"[NOT_FOUND] {rscmgr_filename} file does not exist: {rscmgr_path}")
+            return None
+    
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to find rscmgr file: {str(e)}")
+        return None
 
 def find_android_mk_from_samsung_path(samsung_path, log_callback=None):
     """Find Android.mk in samsung vendor path"""
@@ -326,6 +370,141 @@ def create_rscmgr_file(rscmgr_folder_path, rscmgr_filename, source_rscmgr_path,
         raise
 
 
+def detect_existing_resources(rscmgr_path, log_callback=None):
+    """
+    Detect which resource sections already exist in rscmgr file
+    
+    Returns:
+        Tuple[bool, bool]: (has_resource1, has_resource2)
+    """
+    try:
+        local_path = depot_to_local_path(rscmgr_path)
+        
+        with open(local_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        has_resource1 = "sys.readahead.resource=1" in content
+        has_resource2 = "sys.readahead.resource=2" in content
+        
+        if log_callback:
+            log_callback(f"[DETECT] Existing resources: resource=1: {has_resource1}, resource=2: {has_resource2}")
+        
+        return has_resource1, has_resource2
+    
+    except FileNotFoundError:
+        # File doesn't exist yet
+        return False, False
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to detect resources: {str(e)}")
+        return False, False
+
+
+def remove_setprop_from_resource(rscmgr_path, resource_num, log_callback=None):
+    """
+    Remove 'setprop sys.readahead.resource 0' line from specified resource section
+    """
+    try:
+        local_path = depot_to_local_path(rscmgr_path)
+        
+        with open(local_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        resource_pattern = f"sys.readahead.resource={resource_num}"
+        section_start_index = None
+        section_end_index = None
+        
+        # Find the resource section
+        for i, line in enumerate(lines):
+            if resource_pattern in line:
+                section_start_index = i
+                
+                # Find end of this section
+                section_end_index = len(lines)
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip().startswith("on property:"):
+                        section_end_index = j
+                        break
+                
+                break
+        
+        if section_start_index is None:
+            return  # Section doesn't exist, nothing to remove
+        
+        # Find and remove setprop line in this section
+        lines_to_remove = []
+        for i in range(section_start_index, section_end_index):
+            if "setprop sys.readahead.resource 0" in lines[i]:
+                lines_to_remove.append(i)
+        
+        # Remove lines in reverse order to maintain indices
+        for i in reversed(lines_to_remove):
+            del lines[i]
+            if log_callback:
+                log_callback(f"[REMOVE] Removed setprop from resource={resource_num}")
+        
+        # Write updated content
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to remove setprop: {str(e)}")
+
+
+def ensure_setprop_in_resource(rscmgr_path, resource_num, log_callback=None):
+    """
+    Ensure 'setprop sys.readahead.resource 0' exists at the end of resource section
+    """
+    try:
+        local_path = depot_to_local_path(rscmgr_path)
+        
+        with open(local_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        resource_pattern = f"sys.readahead.resource={resource_num}"
+        section_start_index = None
+        section_end_index = None
+        
+        # Find the resource section
+        for i, line in enumerate(lines):
+            if resource_pattern in line:
+                section_start_index = i
+                
+                # Find end of this section
+                section_end_index = len(lines)
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip().startswith("on property:"):
+                        section_end_index = j
+                        break
+                
+                break
+        
+        if section_start_index is None:
+            return  # Section doesn't exist
+        
+        # Check if setprop already exists in this section
+        has_setprop = False
+        for i in range(section_start_index, section_end_index):
+            if "setprop sys.readahead.resource 0" in lines[i]:
+                has_setprop = True
+                break
+        
+        if not has_setprop:
+            # Add setprop at the end of section
+            lines.insert(section_end_index, "    setprop sys.readahead.resource 0\n")
+            if log_callback:
+                log_callback(f"[ADD] Added setprop to resource={resource_num}")
+            
+            # Write updated content
+            with open(local_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+    
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to ensure setprop: {str(e)}")
+
+
 def edit_rscmgr_file(rscmgr_path, resource_num, libraries, changelist_id, log_callback=None):
     """Edit rscmgr file to add libraries to specified resource section"""
     if log_callback:
@@ -355,7 +534,7 @@ def edit_rscmgr_file(rscmgr_path, resource_num, libraries, changelist_id, log_ca
 
                 break
 
-        # If resource section not found, create it
+        # If resource section not found, create it (without setprop for now)
         if section_start_index is None:
             if log_callback:
                 log_callback(f"[CREATE] Creating new resource section for resource={resource_num}")
@@ -363,7 +542,7 @@ def edit_rscmgr_file(rscmgr_path, resource_num, libraries, changelist_id, log_ca
             new_section = [f"\non property:sys.readahead.resource={resource_num}\n"]
             for lib in libraries:
                 new_section.append(f"    readahead {lib} --fully\n")
-            new_section.append("    setprop sys.readahead.resource 0\n")
+            # Note: setprop will be added later by manage_setprop_lines()
 
             lines.extend(new_section)
         else:
@@ -396,6 +575,46 @@ def edit_rscmgr_file(rscmgr_path, resource_num, libraries, changelist_id, log_ca
         if log_callback:
             log_callback(f"[ERROR] Failed to edit rscmgr file: {str(e)}")
         raise
+
+
+def manage_setprop_lines(rscmgr_path, existing_res1, existing_res2, 
+                         processing_res1, processing_res2, log_callback=None):
+    """
+    Manage setprop lines based on final resource state
+    
+    Args:
+        existing_res1: Resource=1 existed before processing
+        existing_res2: Resource=2 existed before processing
+        processing_res1: Resource=1 being added/modified now
+        processing_res2: Resource=2 being added/modified now
+    """
+    # Determine final state
+    final_has_res1 = existing_res1 or processing_res1
+    final_has_res2 = existing_res2 or processing_res2
+    final_has_both = final_has_res1 and final_has_res2
+    
+    if log_callback:
+        log_callback(f"[SETPROP] Final state: resource=1: {final_has_res1}, resource=2: {final_has_res2}")
+    
+    if final_has_both:
+        # Has both resources: remove setprop from resource=1, ensure in resource=2
+        if log_callback:
+            log_callback("[SETPROP] Managing setprop for both resources (remove from res=1, ensure in res=2)")
+        
+        remove_setprop_from_resource(rscmgr_path, 1, log_callback)
+        ensure_setprop_in_resource(rscmgr_path, 2, log_callback)
+    
+    elif final_has_res1:
+        # Only resource=1: ensure setprop in resource=1
+        if log_callback:
+            log_callback("[SETPROP] Only resource=1 exists, ensuring setprop")
+        ensure_setprop_in_resource(rscmgr_path, 1, log_callback)
+    
+    elif final_has_res2:
+        # Only resource=2: ensure setprop in resource=2
+        if log_callback:
+            log_callback("[SETPROP] Only resource=2 exists, ensuring setprop")
+        ensure_setprop_in_resource(rscmgr_path, 2, log_callback)
 
 
 def process_single_branch(branch_name, workspace_or_paths, rscmgr_filename, resource1_libs,
@@ -475,7 +694,6 @@ def process_single_branch(branch_name, workspace_or_paths, rscmgr_filename, reso
         # ====================================================================
         # STEP 3: Process rscmgr.rc file
         # ====================================================================
-        # Extract rscmgr folder from Android.mk path
         rscmgr_folder = extract_rscmgr_folder_from_android_mk(android_mk_path)
         rscmgr_path = f"{rscmgr_folder}{rscmgr_filename}"
 
@@ -484,24 +702,37 @@ def process_single_branch(branch_name, workspace_or_paths, rscmgr_filename, reso
 
         rscmgr_exists = validate_depot_path(rscmgr_path)
 
+        # Detect existing resources BEFORE any editing
+        existing_res1, existing_res2 = (False, False)
         if rscmgr_exists:
-            # File exists - need to edit
+            existing_res1, existing_res2 = detect_existing_resources(rscmgr_path, log_callback)
+
+        if rscmgr_exists:
+            # File exists - checkout and edit
             if log_callback:
-                log_callback(f"[{branch_name}] [FOUND] rscmgr file exists - will edit")
+                log_callback(f"[{branch_name}] [FOUND] rscmgr file exists")
             
             map_single_depot(rscmgr_path)
             sync_file_silent(rscmgr_path)
-            checkout_file_silent(rscmgr_path, changelist_id)
+            checkout_file_silent(rscmgr_path, changelist_id, log_callback)
             
-            # Always edit existing files with libraries
+            # Edit with libraries (for all branches with existing files)
             if log_callback:
                 log_callback(f"[{branch_name}] Editing existing rscmgr file with libraries...")
             
             if resource1_libs:
                 edit_rscmgr_file(rscmgr_path, 1, resource1_libs, changelist_id, log_callback)
-
+            
             if resource2_libs:
                 edit_rscmgr_file(rscmgr_path, 2, resource2_libs, changelist_id, log_callback)
+            
+            # Manage setprop after editing
+            manage_setprop_lines(
+                rscmgr_path,
+                existing_res1, existing_res2,
+                bool(resource1_libs), bool(resource2_libs),
+                log_callback
+            )
         else:
             # File doesn't exist - create it
             if log_callback:
@@ -510,20 +741,41 @@ def process_single_branch(branch_name, workspace_or_paths, rscmgr_filename, reso
             rscmgr_path = create_rscmgr_file(rscmgr_folder, rscmgr_filename, 
                                             source_rscmgr_path, changelist_id, log_callback)
             
-            # Only edit newly created files if first branch
-            # (cascaded branches will have content copied from source)
+            # CRITICAL FIX: Only edit if first branch
+            # Cascaded branches already have content from source, don't duplicate!
             if is_first_branch:
                 if log_callback:
                     log_callback(f"[{branch_name}] Editing newly created file (first branch)...")
                 
                 if resource1_libs:
                     edit_rscmgr_file(rscmgr_path, 1, resource1_libs, changelist_id, log_callback)
-
+                
                 if resource2_libs:
                     edit_rscmgr_file(rscmgr_path, 2, resource2_libs, changelist_id, log_callback)
+                
+                # Manage setprop after editing
+                manage_setprop_lines(
+                    rscmgr_path,
+                    False, False,  # New file, no existing resources
+                    bool(resource1_libs), bool(resource2_libs),
+                    log_callback
+                )
             else:
+                # Cascaded branch with new file created from source
+                # Content already copied, just manage setprop
                 if log_callback:
-                    log_callback(f"[{branch_name}] Skipping edit (content copied from previous branch)")
+                    log_callback(f"[{branch_name}] Content copied from source, managing setprop only...")
+                
+                # Detect what resources exist in the copied content
+                copied_res1, copied_res2 = detect_existing_resources(rscmgr_path, log_callback)
+                
+                # Manage setprop based on copied content
+                manage_setprop_lines(
+                    rscmgr_path,
+                    copied_res1, copied_res2,
+                    False, False,  # Not processing new resources, just managing existing
+                    log_callback
+                )
 
         if log_callback:
             log_callback(f"[{branch_name}] ✓ rscmgr.rc processed")
