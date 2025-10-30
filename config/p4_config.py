@@ -5,10 +5,11 @@ Handles dynamic client name and workspace root detection
 import os
 import subprocess
 import re
-
+from P4 import P4, P4Exception
 # Global variables
 CLIENT_NAME = None
 WORKSPACE_ROOT = None
+
 
 def get_p4_client_info():
     """Get P4 client name and workspace root dynamically from P4 client spec"""
