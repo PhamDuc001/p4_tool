@@ -374,7 +374,7 @@ class LoadApkAssetTab:
             if not validate_depot_path(readahead_mgr_path):
                 raise RuntimeError(f"ReadaheadManager.java not found at: {readahead_mgr_path}")
 
-            self.log_callback(f"[PARSE] ✓ Validated ReadaheadManager.java exists")
+            self.log_callback(f"[PARSE]  Validated ReadaheadManager.java exists")
             
             # Update UI with path
             self.gui_utils.root.after(
@@ -440,7 +440,7 @@ class LoadApkAssetTab:
                 count += 1
                 self.log_callback(f"[UI] Added: {chipset} -> {assets_str}")
 
-            self.log_callback(f"[UI] ✓ Successfully displayed {count} chipsets in table")
+            self.log_callback(f"[UI]  Successfully displayed {count} chipsets in table")
             
             # Force tree update
             self.chipset_tree.update_idletasks()

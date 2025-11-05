@@ -8,7 +8,6 @@ from tkinter import ttk, messagebox
 import threading
 from processes.parse_process import (
     parse_multiple_workspaces, 
-    validate_workspace_exists,
     refresh_adb_devices,
     connect_to_device,
     calculate_library_sizes

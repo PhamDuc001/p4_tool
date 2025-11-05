@@ -292,7 +292,6 @@ class ReadaheadTab:
     def _parse_rscmgr_paths_logic(self, workspaces):
         """Parse rscmgr paths logic - simple validation only"""
         from processes.readahead_process import (
-            find_device_common_mk_path,
             find_rscmgr_filename_from_device_common,
             find_rscmgr_file_path,
             prompt_for_rscmgr_filename,
@@ -301,6 +300,7 @@ class ReadaheadTab:
             map_single_depot,
             sync_file_silent,
             validate_depot_path,
+            find_device_common_mk_path
         )
 
         try:

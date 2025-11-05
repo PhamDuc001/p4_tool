@@ -209,8 +209,8 @@ class BringupTab:
         # Check if it's a workspace
         elif user_input.upper().startswith("TEMPLATE"):
             try:
-                from core.p4_operations import resolve_workspace_to_device_common_path
-                resolved_path = resolve_workspace_to_device_common_path(user_input)
+                from core.p4_operations import find_device_common_mk_path
+                resolved_path, _= find_device_common_mk_path(user_input)
                 return True, resolved_path, None
             except Exception as e:
                 return False, "", f"{field_name} workspace resolution failed: {str(e)}"
@@ -243,8 +243,8 @@ class BringupTab:
         # Check if it's a workspace
         elif user_input.upper().startswith("TEMPLATE"):
             try:
-                from core.p4_operations import resolve_workspace_to_device_common_path
-                resolved_path = resolve_workspace_to_device_common_path(user_input)
+                from core.p4_operations import find_device_common_mk_path
+                resolved_path, _ = find_device_common_mk_path(user_input)
                 return True, user_input, None  # Keep original workspace for system processing
             except Exception as e:
                 return False, "", f"{field_name} workspace resolution failed: {str(e)}"

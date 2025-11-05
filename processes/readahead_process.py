@@ -1,173 +1,86 @@
 """
-Readahead process implementation with full integration history support
-Handles cascading across REL → FLUMEN → BENI with automatic integration
-Processes: device_common.mk, Android.mk, and rscmgr.rc files
+Enhanced System process implementation
+Handles the system bringup workflow for workspace-based operations with improved rscmgr handling
+Enhanced to support mixed input (depot paths and workspaces)
+Enhanced Samsung vendor path filtering with priority-based logic
+FIXED: Now processes ALL auto-resolved targets, not just originally provided ones
+NEW: Added Android.mk processing support with module definition management
 """
 
 import os
 import re
 import subprocess
-from typing import Dict, List, Optional, Tuple
-from tkinter import messagebox, simpledialog
-
+from P4 import P4, P4Exception
 from core.p4_operations import (
-    is_workspace_like,
-    get_integration_source_depot_path,
-    create_changelist_silent,
-    map_single_depot,
-    sync_file_silent,
-    checkout_file_silent,
-    validate_depot_path,
+    get_client_name, run_cmd, create_changelist_silent, 
+    map_single_depot, sync_file_silent, checkout_file_silent,
+    validate_device_common_mk_path, validate_depot_path,
+    is_workspace_like, auto_resolve_missing_branches, find_device_common_mk_path
 )
-from processes.system_process import find_device_common_mk_path
 from config.p4_config import depot_to_local_path
-import tkinter as tk
-from tkinter import simpledialog as sd
-from tkinter import messagebox
 
-
-def validate_workspace_format(workspace_name):
-    """Validate if workspace has proper TEMPLATE format"""
-    if not workspace_name:
-        return False
-    return is_workspace_like(workspace_name)
-
-
-def find_rscmgr_filename_from_device_common(device_common_path, log_callback=None):
-    """Find rscmgr.rc filename from device_common.mk file"""
-    if log_callback:
-        log_callback(f"[READAHEAD] Searching rscmgr filename in: {device_common_path}")
-
-    try:
-        local_path = depot_to_local_path(device_common_path)
-
-        with open(local_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Look for rscmgr.rc or rscmgr_{model}.rc pattern
-        rscmgr_match = re.search(r"rscmgr(?:_\w+)?\.rc", content)
-
-        if rscmgr_match:
-            rscmgr_file = rscmgr_match.group(0)
-            if log_callback:
-                log_callback(f"[OK] Found rscmgr filename: {rscmgr_file}")
-            return rscmgr_file
-        else:
-            if log_callback:
-                log_callback("[WARNING] No rscmgr filename found in device_common.mk")
-            return None
-
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error reading device_common.mk: {str(e)}")
-        return None
-
-
-def prompt_for_rscmgr_filename(log_callback=None):
-    """Prompt user to input rscmgr filename via dialog"""
-    if log_callback:
-        log_callback("[INPUT] Prompting user for rscmgr filename...")
-
-    try:
-        # Create a temporary root window for the dialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-
-        try:
-            filename = sd.askstring(
-                "Rscmgr Filename",
-                "Enter the rscmgr filename (e.g., rscmgr.rc or rscmgr_mt6789.rc):",
-                initialvalue="rscmgr.rc",
-                parent=root
-            )
-        finally:
-            try:
-                root.destroy()
-            except:
-                pass
-
-        if filename:
-            if log_callback:
-                log_callback(f"[INPUT] User provided rscmgr filename: {filename}")
-            return filename.strip()
-
-        if log_callback:
-            log_callback("[INFO] User cancelled input dialog")
-        return None
-
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Dialog error: {str(e)}")
-        if log_callback:
-            log_callback("[FALLBACK] Using default rscmgr.rc")
-        return "rscmgr.rc"
-
-
-def construct_rscmgr_file_path(samsung_path, rscmgr_filename):
-    """Construct rscmgr file path from samsung base path"""
-    return f"{samsung_path}system/rscmgr/{rscmgr_filename}"
-
-def find_rscmgr_file_path(workspace_name, rscmgr_filename, log_callback=None):
-    """
-    Find rscmgr file path in workspace
-    
-    Args:
-        workspace_name: Workspace name (TEMPLATE_*)
-        rscmgr_filename: Name of rscmgr file (e.g., rscmgr.rc)
-        log_callback: Optional logging callback
-    
-    Returns:
-        str: Depot path to rscmgr file, or None if not found
-    """
-    if log_callback:
-        log_callback(f"[SEARCH] Looking for {rscmgr_filename} in workspace: {workspace_name}")
-    
-    try:
-        # Step 1: Find samsung vendor path from workspace
-        samsung_vendor_path = find_samsung_vendor_path(workspace_name, log_callback)
-        
-        if not samsung_vendor_path:
-            if log_callback:
-                log_callback("[ERROR] Cannot find Samsung vendor path")
-            return None
-        
-        # Step 2: Construct rscmgr file path
-        rscmgr_path = construct_rscmgr_file_path(samsung_vendor_path, rscmgr_filename)
-        
-        if log_callback:
-            log_callback(f"[CONSTRUCTED] Rscmgr path: {rscmgr_path}")
-        
-        # Step 3: Validate if file exists
-        if validate_depot_path(rscmgr_path):
-            if log_callback:
-                log_callback(f"[FOUND] {rscmgr_filename} file exists: {rscmgr_path}")
-            return rscmgr_path
-        else:
-            if log_callback:
-                log_callback(f"[NOT_FOUND] {rscmgr_filename} file does not exist: {rscmgr_path}")
-            return None
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to find rscmgr file: {str(e)}")
-        return None
-
-def find_android_mk_from_samsung_path(samsung_path, log_callback=None):
-    """Find Android.mk in samsung vendor path"""
-    android_mk_path = f"{samsung_path}system/rscmgr/Android.mk"
-    
-    if validate_depot_path(android_mk_path):
-        if log_callback:
-            log_callback(f"[FOUND] Android.mk: {android_mk_path}")
-        return android_mk_path
-    
-    if log_callback:
-        log_callback(f"[NOT_FOUND] Android.mk not found: {android_mk_path}")
+def extract_model_from_rscmgr_filename(rscmgr_filename):
+    """Extract model name from rscmgr filename"""
+    # Extract model from rscmgr_mt6789.rc -> mt6789
+    match = re.search(r'rscmgr_(.+)\.rc$', rscmgr_filename)
+    if match:
+        return match.group(1)
     return None
 
+def resolve_input_to_device_common_path(user_input, log_callback=None):
+    """
+    ENHANCED: Use parse_process.py approach for workspace resolution
+    Resolve user input (depot path or workspace) to device_common.mk depot path
+    Returns the resolved device_common.mk path
+    """
+    user_input = user_input.strip()
+    
+    if not user_input:
+        return None
+    
+    # If it's a depot path
+    if user_input.startswith("//"):
+        if log_callback:
+            log_callback(f"[INPUT] Detected depot path: {user_input}")
+        
+        # Validate path exists and is device_common.mk
+        exists, is_device_common = validate_device_common_mk_path(user_input)
+        
+        if not exists:
+            raise RuntimeError(f"Depot path does not exist: {user_input}")
+        
+        if not is_device_common:
+            raise RuntimeError(f"Path must be a device_common.mk file: {user_input}")
+        
+        return user_input
+    
+    # If it's a workspace
+    elif is_workspace_like(user_input):
+        if log_callback:
+            log_callback(f"[INPUT] Detected workspace: {user_input}")
+        
+        try:
+            # Use enhanced workspace resolution like parse_process.py
+            resolved_path, _ = find_device_common_mk_path(user_input, log_callback)
+            if resolved_path:
+                if log_callback:
+                    log_callback(f"[OK] Resolved workspace to: {resolved_path}")
+                return resolved_path
+            else:
+                raise RuntimeError(f"Could not resolve workspace to device_common.mk: {user_input}")
+        except Exception as e:
+            raise RuntimeError(f"Workspace resolution failed: {str(e)}")
+    
+    else:
+        raise RuntimeError(f"Input must be either device_common.mk depot path (//depot/...) or workspace (TEMPLATE_*): {user_input}")
 
-def find_samsung_vendor_path(workspace_name, log_callback=None):
+
+# Need check
+#=============================
+#=============================
+
+
+def find_samsung_vendor_path_from_workspace(workspace_name, log_callback=None):
     """Find vendor/samsung base path from workspace"""
     try:
         _, view_paths = find_device_common_mk_path(workspace_name, log_callback)
@@ -182,7 +95,7 @@ def find_samsung_vendor_path(workspace_name, log_callback=None):
                     return samsung_path
         
         if log_callback:
-            log_callback("[NOT_FOUND] No vendor/samsung path found")
+            log_callback("[NOT_FOUND] No vendor/samsung path found in workspace")
         return None
     
     except Exception as e:
@@ -191,52 +104,41 @@ def find_samsung_vendor_path(workspace_name, log_callback=None):
         return None
 
 
-def extract_rscmgr_folder_from_android_mk(android_mk_path):
-    """Extract rscmgr folder path from Android.mk path"""
-    if android_mk_path and android_mk_path.endswith("Android.mk"):
-        return android_mk_path.rsplit("/", 1)[0] + "/"
-    return None
-
-
-def add_rscmgr_to_device_common_mk(device_common_path, rscmgr_filename, changelist_id, log_callback=None):
-    """
-    Add rscmgr reference to device_common.mk if not already present
-    Returns True if file was modified, False if already exists
-    """
+def find_samsung_vendor_path_from_device_common(device_common_path, log_callback=None):
+    """Construct samsung vendor path from device_common.mk path"""
     try:
-        local_path = depot_to_local_path(device_common_path)
-
-        with open(local_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check if already exists
-        if rscmgr_filename in content:
+        # Extract base path from device_common.mk path
+        # Pattern: //depot/.../vendor/samsung/device/model_common/device_common.mk
+        # Extract: //depot/.../vendor/samsung/
+        match = re.search(r'^(.+/vendor/samsung/)', device_common_path)
+        if match:
+            samsung_path = match.group(1)
             if log_callback:
-                log_callback("[INFO] rscmgr reference already exists in device_common.mk - no checkout needed")
-            return False
-
-        # Need to modify - checkout first
-        checkout_file_silent(device_common_path, changelist_id)
-
-        # Append to file
-        lines = content.splitlines(keepends=True)
-        lines.append("\n")
-        lines.append("# SystemPerformance - rscmgr\n")
-        lines.append("PRODUCT_PACKAGES += \\\n")
-        lines.append(f"    {rscmgr_filename}\n")
-
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-
-        if log_callback:
-            log_callback("[OK] Added rscmgr reference to device_common.mk")
+                log_callback(f"[CONSTRUCTED] Samsung vendor path: {samsung_path}")
+            return samsung_path
         
-        return True
-
+        if log_callback:
+            log_callback("[ERROR] Cannot extract samsung path from device_common.mk path")
+        return None
+    
     except Exception as e:
         if log_callback:
-            log_callback(f"[ERROR] Failed to add rscmgr reference: {str(e)}")
-        raise
+            log_callback(f"[ERROR] Error constructing samsung path: {str(e)}")
+        return None
+
+
+def find_android_mk_from_samsung_path(samsung_path, log_callback=None):
+    """Find Android.mk in samsung vendor path"""
+    android_mk_path = f"{samsung_path}system/rscmgr/Android.mk"
+    
+    if validate_depot_path(android_mk_path):
+        if log_callback:
+            log_callback(f"[FOUND] Android.mk: {android_mk_path}")
+        return android_mk_path
+    
+    if log_callback:
+        log_callback(f"[NOT_FOUND] Android.mk not found: {android_mk_path}")
+    return None
 
 
 def check_rscmgr_in_android_mk(android_mk_path, rscmgr_filename, log_callback=None):
@@ -270,7 +172,8 @@ def add_rscmgr_module_to_android_mk(android_mk_path, rscmgr_filename, changelist
         if check_rscmgr_in_android_mk(android_mk_path, rscmgr_filename, log_callback):
             return
 
-        checkout_file_silent(android_mk_path, changelist_id)
+        # Checkout Android.mk
+        checkout_file_silent(android_mk_path, changelist_id, log_callback)
 
         with open(local_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -299,700 +202,643 @@ def add_rscmgr_module_to_android_mk(android_mk_path, rscmgr_filename, changelist
         raise
 
 
-def copy_rscmgr_file_content(source_rscmgr_path, target_rscmgr_path, log_callback=None):
-    """Copy rscmgr file content from source to target"""
+def construct_rscmgr_file_path(samsung_path, rscmgr_filename, log_callback=None):
+    """
+    Construct rscmgr file path by appending system/rscmgr/{rscmgr_filename}
+    """
+    rscmgr_path = f"{samsung_path}system/rscmgr/{rscmgr_filename}"
+    return rscmgr_path
+
+
+def find_rscmgr_file_in_samsung_paths(samsung_paths, rscmgr_filename, log_callback=None):
+    """
+    Find rscmgr file in samsung vendor paths using new construction logic
+    Returns the depot path to the rscmgr file if found
+    """
+    if log_callback:
+        log_callback(f"[SYSTEM] Searching for {rscmgr_filename} in filtered samsung paths...")
+    
+    for samsung_path in samsung_paths:
+        # Construct rscmgr file path
+        rscmgr_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename, log_callback)
+        
+        # Validate if file exists using p4 files command
+        try:
+            result = subprocess.run(
+                f"p4 files {rscmgr_path}", 
+                capture_output=True, 
+                text=True, 
+                shell=True
+            )
+            
+            if result.returncode == 0 and "no such file" not in result.stderr.lower():
+                if log_callback:
+                    log_callback(f"[OK] Found rscmgr file: {rscmgr_path}")
+                return rscmgr_path
+                
+        except Exception:
+            continue
+    
+    if log_callback:
+        log_callback(f"[WARNING] {rscmgr_filename} not found in any filtered samsung vendor paths")
+    
+    return None
+
+
+def get_rscmgr_reference_from_device_common(device_common_path, log_callback=None):
+    """
+    Get rscmgr file reference from device_common.mk
+    Returns the rscmgr filename if found, None otherwise
+    """
     try:
-        source_local = depot_to_local_path(source_rscmgr_path)
-        target_local = depot_to_local_path(target_rscmgr_path)
-
-        with open(source_local, "r", encoding="utf-8") as f:
-            source_content = f.read()
-
-        with open(target_local, "w", encoding="utf-8") as f:
-            f.write(source_content)
-
+        local_path = depot_to_local_path(device_common_path)
+        
+        with open(local_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Look for rscmgr.rc or rscmgr_{model}.rc pattern
+        rscmgr_match = re.search(r'rscmgr(?:_\w+)?\.rc', content)
+        
+        if rscmgr_match:
+            return rscmgr_match.group(0)
+        
+        return None
+        
+    except Exception as e:
         if log_callback:
-            log_callback("[OK] Copied rscmgr file content")
+            log_callback(f"[ERROR] Error reading device_common.mk: {str(e)}")
+        return None
 
+
+def update_device_common_mk_rscmgr_reference(device_common_path, old_rscmgr_filename, new_rscmgr_filename, log_callback=None):
+    """
+    Update rscmgr file reference in device_common.mk
+    """
+    if log_callback:
+        log_callback(f"[SYSTEM] Updating device_common.mk: {old_rscmgr_filename} → {new_rscmgr_filename}")
+    
+    try:
+        local_path = depot_to_local_path(device_common_path)
+        
+        # Read current content
+        with open(local_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Replace old rscmgr filename with new one
+        updated_content = content.replace(old_rscmgr_filename, new_rscmgr_filename)
+        
+        # Write updated content
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+        
+        if log_callback:
+            log_callback(f"[OK] Updated device_common.mk rscmgr reference")
+            
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to update device_common.mk: {str(e)}")
+        raise
+
+
+def add_rscmgr_reference_to_device_common(device_common_path, rscmgr_filename, log_callback=None):
+    """
+    Add rscmgr file reference to device_common.mk if not exists
+    """
+    if log_callback:
+        log_callback(f"[SYSTEM] Adding rscmgr reference to device_common.mk: {rscmgr_filename}")
+    
+    try:
+        local_path = depot_to_local_path(device_common_path)
+        
+        # Read current content
+        with open(local_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        # Add rscmgr reference at the end
+        lines.append('\n')  # Add empty line
+        lines.append('# Rscmgr \n')
+        lines.append('PRODUCT_PACKAGES += \\\n')
+        lines.append(f'    {rscmgr_filename}\n')
+        
+        # Write updated content
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.writelines(lines)
+        
+        if log_callback:
+            log_callback(f"[OK] Added rscmgr reference to device_common.mk")
+            
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to add rscmgr reference: {str(e)}")
+        raise
+
+
+def copy_rscmgr_content(source_path, target_path, log_callback=None):
+    """
+    Copy content from source rscmgr file to target rscmgr file
+    """
+    if log_callback:
+        log_callback(f"[SYSTEM] Copying rscmgr content from VINCE to target...")
+    
+    try:
+        source_local = depot_to_local_path(source_path)
+        target_local = depot_to_local_path(target_path)
+        
+        # Read source content
+        with open(source_local, 'r', encoding='utf-8') as f:
+            source_content = f.read()
+        
+        # Write to target (overwrite completely)
+        with open(target_local, 'w', encoding='utf-8') as f:
+            f.write(source_content)
+        
+        if log_callback:
+            log_callback("[OK] Rscmgr content copied successfully")
+            
     except Exception as e:
         if log_callback:
             log_callback(f"[ERROR] Failed to copy rscmgr content: {str(e)}")
         raise
 
 
-def create_rscmgr_file(rscmgr_folder_path, rscmgr_filename, source_rscmgr_path, 
-                       changelist_id, log_callback=None):
-    """Create new rscmgr file by copying from source or creating stub"""
+def create_rscmgr_file(samsung_path, rscmgr_filename, vince_rscmgr_path, changelist_id, log_callback=None):
+    """
+    Create new rscmgr file by syncing folder and creating file with VINCE content
+    """
+    if log_callback:
+        log_callback(f"[SYSTEM] Creating new rscmgr file: {rscmgr_filename}")
+    
     try:
-        if log_callback:
-            log_callback(f"[CREATE] Creating new rscmgr file...")
-
+        # Construct rscmgr folder path
+        rscmgr_folder_path = f"{samsung_path}system/rscmgr/..."
+        
         # Map and sync the rscmgr folder
-        map_single_depot(f"{rscmgr_folder_path}...")
-        sync_file_silent(f"{rscmgr_folder_path}...")
-
-        # Construct target path
-        target_rscmgr_path = f"{rscmgr_folder_path}{rscmgr_filename}"
+        if log_callback:
+            log_callback(f"[SYNC] Syncing rscmgr folder: {rscmgr_folder_path}")
         
-        # Ensure local directory exists
-        target_local = depot_to_local_path(target_rscmgr_path)
-        target_dir = os.path.dirname(target_local)
-        os.makedirs(target_dir, exist_ok=True)
-
-        # Create file content
-        if source_rscmgr_path:
-            # Copy from source
-            copy_rscmgr_file_content(source_rscmgr_path, target_rscmgr_path, log_callback)
-        else:
-            # Create stub file
-            stub_content = "# rscmgr rc file\n"
-            with open(target_local, "w", encoding="utf-8") as f:
-                f.write(stub_content)
-            if log_callback:
-                log_callback("[OK] Created stub rscmgr file")
-
+        map_single_depot(rscmgr_folder_path, log_callback)
+        sync_file_silent(rscmgr_folder_path)
+        
+        # Get local folder path
+        local_folder_path = depot_to_local_path(f"{samsung_path}system/rscmgr/")
+        
+        # Ensure directory exists
+        os.makedirs(local_folder_path, exist_ok=True)
+        
+        # Create new file path
+        local_new_file_path = os.path.join(local_folder_path, rscmgr_filename)
+        
+        # Read VINCE content
+        vince_local = depot_to_local_path(vince_rscmgr_path)
+        with open(vince_local, 'r', encoding='utf-8') as f:
+            vince_content = f.read()
+        
+        # Create new file with VINCE content
+        with open(local_new_file_path, 'w', encoding='utf-8') as f:
+            f.write(vince_content)
+        
+        if log_callback:
+            log_callback(f"[OK] Created new rscmgr file: {local_new_file_path}")
+        
         # Add file to P4
-        cmd = f"p4 add -c {changelist_id} {target_rscmgr_path}"
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-
-        if result.returncode == 0:
-            if log_callback:
-                log_callback(f"[OK] New rscmgr file added to changelist {changelist_id}")
-        else:
-            if log_callback:
-                log_callback(f"[WARNING] p4 add result: {result.stderr}")
+        new_file_depot_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename)
+        add_file_to_p4(new_file_depot_path, changelist_id, log_callback)
         
-        return target_rscmgr_path
-
+        # Return depot path for the new file
+        return new_file_depot_path
+        
     except Exception as e:
         if log_callback:
             log_callback(f"[ERROR] Failed to create rscmgr file: {str(e)}")
         raise
 
 
-def detect_existing_resources(rscmgr_path, log_callback=None):
-    """
-    Detect which resource sections already exist in rscmgr file
-    
-    Returns:
-        Tuple[bool, bool]: (has_resource1, has_resource2)
-    """
+def get_file_line_count(file_path):
+    """Get number of lines in a file"""
     try:
-        local_path = depot_to_local_path(rscmgr_path)
-        
-        with open(local_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        has_resource1 = "sys.readahead.resource=1" in content
-        has_resource2 = "sys.readahead.resource=2" in content
-        
-        if log_callback:
-            log_callback(f"[DETECT] Existing resources: resource=1: {has_resource1}, resource=2: {has_resource2}")
-        
-        return has_resource1, has_resource2
-    
-    except FileNotFoundError:
-        # File doesn't exist yet
-        return False, False
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to detect resources: {str(e)}")
-        return False, False
+        local_path = depot_to_local_path(file_path)
+        with open(local_path, 'r', encoding='utf-8') as f:
+            return len(f.readlines())
+    except:
+        return 0
 
 
-def remove_setprop_from_resource(rscmgr_path, resource_num, log_callback=None):
+def add_file_to_p4(file_depot_path, changelist_id, log_callback=None):
     """
-    Remove 'setprop sys.readahead.resource 0' line from specified resource section
+    Add new file to P4 and changelist
     """
     try:
-        local_path = depot_to_local_path(rscmgr_path)
+        if log_callback:
+            log_callback(f"[P4] Adding new file to P4: {file_depot_path}")
         
-        with open(local_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        # Add file to P4
+        cmd = f"p4 add -c {changelist_id} {file_depot_path}"
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         
-        resource_pattern = f"sys.readahead.resource={resource_num}"
-        section_start_index = None
-        section_end_index = None
-        
-        # Find the resource section
-        for i, line in enumerate(lines):
-            if resource_pattern in line:
-                section_start_index = i
-                
-                # Find end of this section
-                section_end_index = len(lines)
-                for j in range(i + 1, len(lines)):
-                    if lines[j].strip().startswith("on property:"):
-                        section_end_index = j
-                        break
-                
-                break
-        
-        if section_start_index is None:
-            return  # Section doesn't exist, nothing to remove
-        
-        # Find and remove setprop line in this section
-        lines_to_remove = []
-        for i in range(section_start_index, section_end_index):
-            if "setprop sys.readahead.resource 0" in lines[i]:
-                lines_to_remove.append(i)
-        
-        # Remove lines in reverse order to maintain indices
-        for i in reversed(lines_to_remove):
-            del lines[i]
+        if result.returncode == 0:
             if log_callback:
-                log_callback(f"[REMOVE] Removed setprop from resource={resource_num}")
-        
-        # Write updated content
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to remove setprop: {str(e)}")
-
-
-def ensure_setprop_in_resource(rscmgr_path, resource_num, log_callback=None):
-    """
-    Ensure 'setprop sys.readahead.resource 0' exists at the end of resource section
-    """
-    try:
-        local_path = depot_to_local_path(rscmgr_path)
-        
-        with open(local_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        resource_pattern = f"sys.readahead.resource={resource_num}"
-        section_start_index = None
-        section_end_index = None
-        
-        # Find the resource section
-        for i, line in enumerate(lines):
-            if resource_pattern in line:
-                section_start_index = i
-                
-                # Find end of this section
-                section_end_index = len(lines)
-                for j in range(i + 1, len(lines)):
-                    if lines[j].strip().startswith("on property:"):
-                        section_end_index = j
-                        break
-                
-                break
-        
-        if section_start_index is None:
-            return  # Section doesn't exist
-        
-        # Check if setprop already exists in this section
-        has_setprop = False
-        for i in range(section_start_index, section_end_index):
-            if "setprop sys.readahead.resource 0" in lines[i]:
-                has_setprop = True
-                break
-        
-        if not has_setprop:
-            # Add setprop at the end of section
-            lines.insert(section_end_index, "    setprop sys.readahead.resource 0\n")
-            if log_callback:
-                log_callback(f"[ADD] Added setprop to resource={resource_num}")
-            
-            # Write updated content
-            with open(local_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to ensure setprop: {str(e)}")
-
-
-def edit_rscmgr_file(rscmgr_path, resource_num, libraries, changelist_id, log_callback=None):
-    """Edit rscmgr file to add libraries to specified resource section"""
-    if log_callback:
-        log_callback(f"[EDIT] Adding {len(libraries)} libraries to resource={resource_num}")
-
-    try:
-        local_path = depot_to_local_path(rscmgr_path)
-
-        with open(local_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        resource_pattern = f"sys.readahead.resource={resource_num}"
-        section_start_index = None
-        section_end_index = None
-
-        # Find the resource section
-        for i, line in enumerate(lines):
-            if resource_pattern in line:
-                section_start_index = i
-
-                # Find end of this section
-                section_end_index = len(lines)
-                for j in range(i + 1, len(lines)):
-                    if lines[j].strip().startswith("on property:"):
-                        section_end_index = j
-                        break
-
-                break
-
-        # If resource section not found, create it (without setprop for now)
-        if section_start_index is None:
-            if log_callback:
-                log_callback(f"[CREATE] Creating new resource section for resource={resource_num}")
-
-            new_section = [f"\non property:sys.readahead.resource={resource_num}\n"]
-            for lib in libraries:
-                new_section.append(f"    readahead {lib} --fully\n")
-            # Note: setprop will be added later by manage_setprop_lines()
-
-            lines.extend(new_section)
+                log_callback(f"[OK] File added to P4 and changelist {changelist_id}")
         else:
-            # Resource section exists - insert libraries
             if log_callback:
-                log_callback(f"[MODIFY] Modifying existing resource section")
-
-            insert_index = section_start_index + 1
-
-            # Skip existing readahead entries
-            for j in range(section_start_index + 1, section_end_index):
-                if lines[j].strip().startswith("readahead"):
-                    insert_index = j + 1
-                else:
-                    break
-
-            # Insert new libraries
-            new_libs = [f"    readahead {lib} --fully\n" for lib in libraries]
-            for idx, lib_line in enumerate(new_libs):
-                lines.insert(insert_index + idx, lib_line)
-
-        # Write updated content
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-
-        if log_callback:
-            log_callback(f"[OK] Added {len(libraries)} libraries to resource={resource_num}")
-
+                log_callback(f"[ERROR] Failed to add file to P4: {result.stderr}")
+            raise RuntimeError(f"Failed to add file to P4: {result.stderr}")
+            
     except Exception as e:
         if log_callback:
-            log_callback(f"[ERROR] Failed to edit rscmgr file: {str(e)}")
+            log_callback(f"[ERROR] Error adding file to P4: {str(e)}")
         raise
 
 
-def manage_setprop_lines(rscmgr_path, existing_res1, existing_res2, 
-                         processing_res1, processing_res2, log_callback=None):
+def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_filename, vince_rscmgr_path, 
+                                    changelist_id, log_callback=None):
     """
-    Manage setprop lines based on final resource state
-    
-    Args:
-        existing_res1: Resource=1 existed before processing
-        existing_res2: Resource=2 existed before processing
-        processing_res1: Resource=1 being added/modified now
-        processing_res2: Resource=2 being added/modified now
-    """
-    # Determine final state
-    final_has_res1 = existing_res1 or processing_res1
-    final_has_res2 = existing_res2 or processing_res2
-    final_has_both = final_has_res1 and final_has_res2
-    
-    if log_callback:
-        log_callback(f"[SETPROP] Final state: resource=1: {final_has_res1}, resource=2: {final_has_res2}")
-    
-    if final_has_both:
-        # Has both resources: remove setprop from resource=1, ensure in resource=2
-        if log_callback:
-            log_callback("[SETPROP] Managing setprop for both resources (remove from res=1, ensure in res=2)")
-        
-        remove_setprop_from_resource(rscmgr_path, 1, log_callback)
-        ensure_setprop_in_resource(rscmgr_path, 2, log_callback)
-    
-    elif final_has_res1:
-        # Only resource=1: ensure setprop in resource=1
-        if log_callback:
-            log_callback("[SETPROP] Only resource=1 exists, ensuring setprop")
-        ensure_setprop_in_resource(rscmgr_path, 1, log_callback)
-    
-    elif final_has_res2:
-        # Only resource=2: ensure setprop in resource=2
-        if log_callback:
-            log_callback("[SETPROP] Only resource=2 exists, ensuring setprop")
-        ensure_setprop_in_resource(rscmgr_path, 2, log_callback)
-
-
-def process_single_branch(branch_name, workspace_or_paths, rscmgr_filename, resource1_libs,
-                         resource2_libs, changelist_id, source_rscmgr_path, is_first_branch, log_callback=None):
-    """
-    Process single branch: device_common.mk → Android.mk → rscmgr.rc
-    
-    Args:
-        workspace_or_paths: For first branch - workspace name
-                           For cascaded branches - dict with paths
-        is_first_branch: True if this is the first branch in cascade (edit libraries)
-    
-    Returns:
-        Tuple: (device_common_path, android_mk_path, rscmgr_path)
+    ENHANCED: Now processes device_common.mk, Android.mk, and rscmgr.rc
+    Returns updated changelist_id (may create new one if none provided)
     """
     if log_callback:
-        log_callback(f"\n[{branch_name}] ========== Processing {branch_name} ==========")
-
+        log_callback(f"\n[SYSTEM] Processing {category} input: {workspace_or_path}")
+    
+    current_changelist_id = changelist_id
+    
     try:
-        # ====================================================================
-        # STEP 1: Get device_common.mk path
-        # ====================================================================
-        if isinstance(workspace_or_paths, str):
-            # First branch - get from workspace
-            if log_callback:
-                log_callback(f"[{branch_name}] Finding device_common.mk from workspace...")
-            device_common_path, _ = find_device_common_mk_path(workspace_or_paths, log_callback)
-        else:
-            # Cascaded branch - use provided path
-            device_common_path = workspace_or_paths.get('device_common_path')
-            if log_callback:
-                log_callback(f"[{branch_name}] Using integrated device_common.mk path")
-
+        # ========================================================================
+        # STEP 1: RESOLVE INPUT TO device_common.mk PATH
+        # ========================================================================
+        device_common_path = resolve_input_to_device_common_path(workspace_or_path, log_callback)
         if not device_common_path:
-            raise RuntimeError(f"Cannot find device_common.mk in {branch_name}")
-
-        # Map, sync, checkout device_common.mk
-        map_single_depot(device_common_path)
+            if log_callback:
+                log_callback(f"[ERROR] Failed to resolve {category} input to device_common.mk")
+            return current_changelist_id
+        
+        # Map and sync device_common.mk
+        map_single_depot(device_common_path, log_callback)
         sync_file_silent(device_common_path)
         
-        # Add rscmgr reference (only checkout if needed)
-        add_rscmgr_to_device_common_mk(device_common_path, rscmgr_filename, changelist_id, log_callback)
-
-        if log_callback:
-            log_callback(f"[{branch_name}] ✓ device_common.mk processed")
-
-        # ====================================================================
-        # STEP 2: Get Android.mk path
-        # ====================================================================
-        if isinstance(workspace_or_paths, str):
-            # First branch - find from workspace
-            if log_callback:
-                log_callback(f"[{branch_name}] Finding Android.mk from workspace...")
-            samsung_path = find_samsung_vendor_path(workspace_or_paths, log_callback)
-            if not samsung_path:
-                raise RuntimeError(f"Cannot find samsung vendor path in {branch_name}")
-            android_mk_path = find_android_mk_from_samsung_path(samsung_path, log_callback)
-        else:
-            # Cascaded branch - use provided path
-            android_mk_path = workspace_or_paths.get('android_mk_path')
-            if log_callback:
-                log_callback(f"[{branch_name}] Using integrated Android.mk path")
-
-        if not android_mk_path:
-            raise RuntimeError(f"Cannot find Android.mk in {branch_name}")
-
-        # Map, sync Android.mk
-        map_single_depot(android_mk_path)
-        sync_file_silent(android_mk_path)
+        # ========================================================================
+        # STEP 2: FIND SAMSUNG VENDOR PATH
+        # ========================================================================
+        samsung_path = None
         
-        # Add rscmgr module (only checkout if needed)
-        add_rscmgr_module_to_android_mk(android_mk_path, rscmgr_filename, changelist_id, log_callback)
-
+        # Try to get from workspace first (if input was workspace)
+        if is_workspace_like(workspace_or_path):
+            samsung_path = find_samsung_vendor_path_from_workspace(workspace_or_path, log_callback)
+        
+        # Fallback: construct from device_common path
+        if not samsung_path:
+            if log_callback:
+                log_callback("[FALLBACK] Constructing samsung path from device_common.mk path...")
+            samsung_path = find_samsung_vendor_path_from_device_common(device_common_path, log_callback)
+        
+        if not samsung_path:
+            if log_callback:
+                log_callback(f"[ERROR] Cannot find samsung vendor path for {category}")
+            return current_changelist_id
+        
+        # ========================================================================
+        # STEP 3: PROCESS device_common.mk
+        # ========================================================================
         if log_callback:
-            log_callback(f"[{branch_name}] ✓ Android.mk processed")
-
-        # ====================================================================
-        # STEP 3: Process rscmgr.rc file
-        # ====================================================================
-        rscmgr_folder = extract_rscmgr_folder_from_android_mk(android_mk_path)
-        rscmgr_path = f"{rscmgr_folder}{rscmgr_filename}"
-
-        if log_callback:
-            log_callback(f"[{branch_name}] Checking rscmgr file: {rscmgr_path}")
-
-        rscmgr_exists = validate_depot_path(rscmgr_path)
-
-        # Detect existing resources BEFORE any editing
-        existing_res1, existing_res2 = (False, False)
-        if rscmgr_exists:
-            existing_res1, existing_res2 = detect_existing_resources(rscmgr_path, log_callback)
-
-        if rscmgr_exists:
-            # File exists - checkout and edit
+            log_callback(f"[{category}] Processing device_common.mk...")
+        
+        # Check existing rscmgr reference in device_common.mk
+        existing_rscmgr = get_rscmgr_reference_from_device_common(device_common_path, log_callback)
+        
+        device_common_needs_update = False
+        
+        if existing_rscmgr:
             if log_callback:
-                log_callback(f"[{branch_name}] [FOUND] rscmgr file exists")
+                log_callback(f"[INFO] {category} device_common.mk has existing rscmgr reference: {existing_rscmgr}")
             
-            map_single_depot(rscmgr_path)
-            sync_file_silent(rscmgr_path)
-            checkout_file_silent(rscmgr_path, changelist_id, log_callback)
-            
-            # Edit with libraries (for all branches with existing files)
-            if log_callback:
-                log_callback(f"[{branch_name}] Editing existing rscmgr file with libraries...")
-            
-            if resource1_libs:
-                edit_rscmgr_file(rscmgr_path, 1, resource1_libs, changelist_id, log_callback)
-            
-            if resource2_libs:
-                edit_rscmgr_file(rscmgr_path, 2, resource2_libs, changelist_id, log_callback)
-            
-            # Manage setprop after editing
-            manage_setprop_lines(
-                rscmgr_path,
-                existing_res1, existing_res2,
-                bool(resource1_libs), bool(resource2_libs),
-                log_callback
-            )
-        else:
-            # File doesn't exist - create it
-            if log_callback:
-                log_callback(f"[{branch_name}] [MISSING] Creating new rscmgr file...")
-            
-            rscmgr_path = create_rscmgr_file(rscmgr_folder, rscmgr_filename, 
-                                            source_rscmgr_path, changelist_id, log_callback)
-            
-            # CRITICAL FIX: Only edit if first branch
-            # Cascaded branches already have content from source, don't duplicate!
-            if is_first_branch:
+            # Compare with VINCE rscmgr filename
+            if existing_rscmgr != vince_rscmgr_filename:
                 if log_callback:
-                    log_callback(f"[{branch_name}] Editing newly created file (first branch)...")
-                
-                if resource1_libs:
-                    edit_rscmgr_file(rscmgr_path, 1, resource1_libs, changelist_id, log_callback)
-                
-                if resource2_libs:
-                    edit_rscmgr_file(rscmgr_path, 2, resource2_libs, changelist_id, log_callback)
-                
-                # Manage setprop after editing
-                manage_setprop_lines(
-                    rscmgr_path,
-                    False, False,  # New file, no existing resources
-                    bool(resource1_libs), bool(resource2_libs),
-                    log_callback
-                )
+                    log_callback(f"[DIFF] {category} rscmgr reference differs from VINCE: {existing_rscmgr} ≠ {vince_rscmgr_filename}")
+                device_common_needs_update = True
             else:
-                # Cascaded branch with new file created from source
-                # Content already copied, just manage setprop
                 if log_callback:
-                    log_callback(f"[{branch_name}] Content copied from source, managing setprop only...")
-                
-                # Detect what resources exist in the copied content
-                copied_res1, copied_res2 = detect_existing_resources(rscmgr_path, log_callback)
-                
-                # Manage setprop based on copied content
-                manage_setprop_lines(
-                    rscmgr_path,
-                    copied_res1, copied_res2,
-                    False, False,  # Not processing new resources, just managing existing
-                    log_callback
-                )
-
-        if log_callback:
-            log_callback(f"[{branch_name}] ✓ rscmgr.rc processed")
-            log_callback(f"[{branch_name}] ========== {branch_name} completed ==========")
-
-        return device_common_path, android_mk_path, rscmgr_path
-
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[{branch_name}] [ERROR] {str(e)}")
-        raise
-
-
-def get_cascaded_paths_from_integration(device_common_path, android_mk_path, 
-                                       target_branch, log_callback=None):
-    """
-    Get integrated paths for next branch using integration history
-    
-    Returns:
-        Dict with 'device_common_path' and 'android_mk_path'
-    """
-    try:
-        if log_callback:
-            log_callback(f"[INTEGRATION] Finding {target_branch} paths from integration history...")
-
-        # Get integration source for device_common.mk
-        integrated_device_common = get_integration_source_depot_path(device_common_path, log_callback)
-        
-        # Get integration source for Android.mk
-        integrated_android_mk = get_integration_source_depot_path(android_mk_path, log_callback)
-
-        if not integrated_device_common or not integrated_android_mk:
+                    log_callback(f"[OK] {category} rscmgr reference matches VINCE: {existing_rscmgr}")
+        else:
             if log_callback:
-                log_callback(f"[WARNING] Could not find integration paths for {target_branch}")
-            return None
-
+                log_callback(f"[INFO] {category} device_common.mk has no rscmgr reference, will add: {vince_rscmgr_filename}")
+            device_common_needs_update = True
+        
+        # Update device_common.mk if needed
+        if device_common_needs_update:
+            # Create changelist if not exists
+            if not current_changelist_id:
+                current_changelist_id = create_changelist_silent("System bringup - Update readahead feature")
+                if log_callback:
+                    log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
+            
+            # Checkout device_common.mk
+            checkout_file_silent(device_common_path, current_changelist_id, log_callback)
+            
+            # Update or add rscmgr reference
+            if existing_rscmgr:
+                update_device_common_mk_rscmgr_reference(device_common_path, existing_rscmgr, vince_rscmgr_filename, log_callback)
+            else:
+                add_rscmgr_reference_to_device_common(device_common_path, vince_rscmgr_filename, log_callback)
+        
+        # ========================================================================
+        # STEP 4: PROCESS Android.mk (NEW)
+        # ========================================================================
         if log_callback:
-            log_callback(f"[INTEGRATION] ✓ Found {target_branch} paths via integration")
-
-        return {
-            'device_common_path': integrated_device_common,
-            'android_mk_path': integrated_android_mk
-        }
-
+            log_callback(f"[{category}] Processing Android.mk...")
+        
+        # Find Android.mk
+        android_mk_path = find_android_mk_from_samsung_path(samsung_path, log_callback)
+        
+        if not android_mk_path:
+            if log_callback:
+                log_callback(f"[WARNING] Android.mk not found for {category}, skipping...")
+        else:
+            # Map and sync Android.mk
+            map_single_depot(android_mk_path, log_callback)
+            sync_file_silent(android_mk_path)
+            
+            # Check if rscmgr module exists
+            module_exists = check_rscmgr_in_android_mk(android_mk_path, vince_rscmgr_filename, log_callback)
+            
+            if module_exists:
+                if log_callback:
+                    log_callback(f"[OK] {category} Android.mk already has rscmgr module: {vince_rscmgr_filename}")
+            else:
+                if log_callback:
+                    log_callback(f"[ADD] {category} Android.mk missing rscmgr module, adding...")
+                
+                # Create changelist if not exists
+                if not current_changelist_id:
+                    current_changelist_id = create_changelist_silent("System bringup - Update readahead feature")
+                    if log_callback:
+                        log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
+                
+                # Add module to Android.mk
+                add_rscmgr_module_to_android_mk(android_mk_path, vince_rscmgr_filename, current_changelist_id, log_callback)
+        
+        # ========================================================================
+        # STEP 5: PROCESS rscmgr.rc
+        # ========================================================================
+        if log_callback:
+            log_callback(f"[{category}] Processing rscmgr.rc...")
+        
+        # Find rscmgr file path
+        target_rscmgr_path = construct_rscmgr_file_path(samsung_path, vince_rscmgr_filename, log_callback)
+        
+        if validate_depot_path(target_rscmgr_path):
+            # File exists - check content
+            if log_callback:
+                log_callback(f"[FOUND] {category} rscmgr file exists: {target_rscmgr_path}")
+            
+            # Map and sync rscmgr file
+            map_single_depot(target_rscmgr_path, log_callback)
+            sync_file_silent(target_rscmgr_path)
+            
+            # Compare line counts
+            vince_lines = get_file_line_count(vince_rscmgr_path)
+            target_lines = get_file_line_count(target_rscmgr_path)
+            
+            if log_callback:
+                log_callback(f"[COMPARISON] VINCE {vince_rscmgr_filename}: {vince_lines} lines")
+                log_callback(f"[COMPARISON] {category} {vince_rscmgr_filename}: {target_lines} lines")
+            
+            if target_lines == vince_lines:
+                if log_callback:
+                    log_callback(f"[OK] {category} {vince_rscmgr_filename} has same line count as VINCE - content identical")
+            else:
+                if log_callback:
+                    log_callback(f"[DIFF] {category} {vince_rscmgr_filename} differs from VINCE, updating content...")
+                
+                # Create changelist if not exists
+                if not current_changelist_id:
+                    current_changelist_id = create_changelist_silent("System bringup - Update readahead feature")
+                    if log_callback:
+                        log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
+                
+                # Checkout and update content
+                checkout_file_silent(target_rscmgr_path, current_changelist_id, log_callback)
+                copy_rscmgr_content(vince_rscmgr_path, target_rscmgr_path, log_callback)
+        else:
+            # File doesn't exist - create new one
+            if log_callback:
+                log_callback(f"[MISSING] {category} rscmgr file not found, creating new one...")
+            
+            # Create changelist if not exists
+            if not current_changelist_id:
+                current_changelist_id = create_changelist_silent("System bringup - Update readahead feature")
+                if log_callback:
+                    log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
+            
+            # Create new rscmgr file
+            new_rscmgr_path = create_rscmgr_file(samsung_path, vince_rscmgr_filename, vince_rscmgr_path, current_changelist_id, log_callback)
+            
+            if log_callback:
+                log_callback(f"[OK] {category} rscmgr file created: {new_rscmgr_path}")
+        
+        if log_callback:
+            log_callback(f"[{category}] Processing completed successfully")
+        
+        return current_changelist_id
+        
     except Exception as e:
         if log_callback:
-            log_callback(f"[ERROR] Integration lookup failed: {str(e)}")
-        return None
+            log_callback(f"[ERROR] Failed to process {category} input: {str(e)}")
+        return current_changelist_id
 
 
-def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist_id,
-                         log_callback, progress_callback=None, error_callback=None):
+def run_readahead_process(beni_input, vince_input, flumen_input, rel_input,
+                      log_callback, progress_callback=None, error_callback=None):
     """
-    Execute readahead process with full integration history support
-    Cascades across REL → FLUMEN → BENI automatically
+    ENHANCED: Execute system bringup process that processes ALL auto-resolved targets
+    Now includes Android.mk processing with module definition management
     """
     try:
-        if log_callback:
-            log_callback("[READAHEAD] Starting readahead process with integration cascading...")
-
         # ============================================================================
-        # STEP 0: DETERMINE PROCESSING ORDER
+        # STEP 1: VALIDATE AND AUTO-RESOLVE INPUTS
         # ============================================================================
-        rel_ws = workspaces.get("REL", "").strip()
-        flumen_ws = workspaces.get("FLUMEN", "").strip()
-        beni_ws = workspaces.get("BENI", "").strip()
+        log_callback("[SYSTEM] Starting enhanced system bringup process with auto-resolve support...")
+        log_callback("[SYSTEM] Will process: device_common.mk, Android.mk, rscmgr.rc")
+        
+        # Validate mandatory VINCE input
+        if not vince_input:
+            error_msg = "VINCE is mandatory for system bringup"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("Missing VINCE", error_msg)
+            return
 
-        if log_callback:
-            log_callback("[VALIDATION] Checking provided workspaces...")
-            log_callback(f"[INPUT] REL: {rel_ws if rel_ws else '(not provided)'}")
-            log_callback(f"[INPUT] FLUMEN: {flumen_ws if flumen_ws else '(not provided)'}")
-            log_callback(f"[INPUT] BENI: {beni_ws if beni_ws else '(not provided)'}")
-
-        # Validate at least one workspace
-        if not rel_ws and not flumen_ws and not beni_ws:
-            raise RuntimeError("At least one workspace from REL, FLUMEN, or BENI is required")
-
-        # Determine cascade order
-        cascade_branches = []
-        if rel_ws:
-            cascade_branches = ["REL", "FLUMEN", "BENI"]
-        elif flumen_ws:
-            cascade_branches = ["FLUMEN", "BENI"]
-        elif beni_ws:
-            cascade_branches = ["BENI"]
-
-        if log_callback:
-            log_callback(f"[CASCADE] Processing order: {' → '.join(cascade_branches)}")
-
-        if progress_callback:
-            progress_callback(10)
-
-        # ============================================================================
-        # STEP 1: FIND RSCMGR FILENAME
-        # ============================================================================
-        primary_branch = cascade_branches[0]
-        primary_workspace = workspaces[primary_branch]
-
-        if log_callback:
-            log_callback(f"[PRIORITY] Using {primary_branch} to find rscmgr filename...")
-
-        device_common_path, _ = find_device_common_mk_path(primary_workspace, log_callback)
-        if not device_common_path:
-            raise RuntimeError(f"Cannot find device_common.mk in {primary_branch}")
-
-        map_single_depot(device_common_path)
-        sync_file_silent(device_common_path)
-
-        rscmgr_filename = find_rscmgr_filename_from_device_common(device_common_path, log_callback)
-
-        if not rscmgr_filename:
-            rscmgr_filename = prompt_for_rscmgr_filename(log_callback)
-            if not rscmgr_filename:
-                raise RuntimeError("rscmgr filename is required")
-
-        if log_callback:
-            log_callback(f"[OK] Using rscmgr filename: {rscmgr_filename}")
+        log_callback("[VALIDATION] Validating VINCE input...")
+        try:
+            vince_device_common_path = resolve_input_to_device_common_path(vince_input, log_callback)
+        except Exception as e:
+            error_msg = f"VINCE input validation failed: {str(e)}"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("VINCE Validation Failed", error_msg)
+            return
 
         if progress_callback:
             progress_callback(20)
 
         # ============================================================================
-        # STEP 2: CREATE/GET SHARED CHANGELIST
+        # STEP 2: AUTO-RESOLVE MISSING BRANCHES
         # ============================================================================
-        if changelist_id:
-            if log_callback:
-                log_callback(f"[CL] Using provided changelist: {changelist_id}")
-        else:
-            changelist_id = create_changelist_silent("Readahead - Update rscmgr files across branches")
-            if log_callback:
-                log_callback(f"[CL] Created new changelist: {changelist_id}")
+        log_callback("\n[AUTO-RESOLVE] Attempting to auto-resolve missing branches...")
+        
+        try:
+            resolved_beni, resolved_flumen, resolved_rel, resolved_vince = auto_resolve_missing_branches(
+                vince_input, flumen_input, beni_input, rel_input, log_callback
+            )
+        except Exception as e:
+            error_msg = f"Auto-resolve failed: {str(e)}"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("Auto-resolve Failed", error_msg)
+            return
+
+        # Update final inputs with resolved values
+        final_beni_input = resolved_beni if resolved_beni else beni_input
+        final_vince_input = resolved_vince if resolved_vince else vince_input
+        final_flumen_input = resolved_flumen if resolved_flumen else flumen_input
+        final_rel_input = resolved_rel if resolved_rel else rel_input
+        
+        log_callback("[AUTO-RESOLVE] Final resolved inputs:")
+        log_callback(f"[FINAL] VINCE: {final_vince_input}")
+        log_callback(f"[FINAL] BENI: {final_beni_input if final_beni_input else '(not available)'}")
+        log_callback(f"[FINAL] FLUMEN: {final_flumen_input if final_flumen_input else '(not available)'}")
+        log_callback(f"[FINAL] REL: {final_rel_input if final_rel_input else '(not available)'}")
 
         if progress_callback:
-            progress_callback(30)
+            progress_callback(40)
 
         # ============================================================================
-        # STEP 3: PROCESS BRANCHES WITH CASCADING
+        # STEP 3: PROCESS VINCE INPUT (Master source)
         # ============================================================================
-        source_rscmgr_path = None
-        current_device_common_path = None
-        current_android_mk_path = None
+        log_callback("\n[SYSTEM] Processing VINCE input (master source)...")
         
-        progress_step = 70 / len(cascade_branches)
-        current_progress = 30
-
-        for idx, branch in enumerate(cascade_branches):
+        # Map and sync VINCE device_common.mk
+        map_single_depot(vince_device_common_path, log_callback)
+        sync_file_silent(vince_device_common_path)
+        
+        # Check readahead feature
+        vince_rscmgr_filename = get_rscmgr_reference_from_device_common(vince_device_common_path, log_callback)
+        if not vince_rscmgr_filename:
+            error_msg = "VINCE does not have readahead feature (rscmgr*.rc not found)"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("Feature Not Found", f"{error_msg}\nCannot proceed with system bringup.")
+            return
+        
+        # Find VINCE rscmgr file
+        vince_rscmgr_path = None
+        
+        # Try from workspace if input was workspace
+        if is_workspace_like(final_vince_input):
             try:
-                # Determine if this is the first branch (for library editing)
-                is_first_branch = (idx == 0)
-                
-                # Determine input for this branch
-                if idx == 0:
-                    # First branch - use workspace name
-                    branch_input = workspaces[branch]
-                else:
-                    # Cascaded branch - get paths from integration
-                    if log_callback:
-                        log_callback(f"\n[CASCADE] Finding {branch} paths from integration...")
-                    
-                    branch_paths = get_cascaded_paths_from_integration(
-                        current_device_common_path, current_android_mk_path,
-                        branch, log_callback
-                    )
-                    
-                    if not branch_paths:
-                        if log_callback:
-                            log_callback(f"[WARNING] Could not cascade to {branch}, skipping...")
-                        continue
-                    
-                    branch_input = branch_paths
-
-                # Process this branch
-                device_common_path, android_mk_path, rscmgr_path = process_single_branch(
-                    branch, branch_input, rscmgr_filename, resource1_libs, resource2_libs,
-                    changelist_id, source_rscmgr_path, is_first_branch, log_callback
-                )
-
-                # Save paths for next cascade
-                current_device_common_path = device_common_path
-                current_android_mk_path = android_mk_path
-                source_rscmgr_path = rscmgr_path
-
-                current_progress += progress_step
-                if progress_callback:
-                    progress_callback(int(current_progress))
-
+                vince_samsung_path = find_samsung_vendor_path_from_workspace(final_vince_input, log_callback)
+                if vince_samsung_path:
+                    vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename, log_callback)
+                    if not validate_depot_path(vince_rscmgr_path):
+                        vince_rscmgr_path = None
             except Exception as e:
                 if log_callback:
-                    log_callback(f"[ERROR] Failed to process {branch}: {str(e)}")
+                    log_callback(f"[WARNING] Workspace-based rscmgr search failed: {str(e)}")
+        
+        # Fallback: construct from device_common path
+        if not vince_rscmgr_path:
+            if log_callback:
+                log_callback("[FALLBACK] Constructing VINCE rscmgr path from device_common.mk...")
+            
+            vince_samsung_path = find_samsung_vendor_path_from_device_common(vince_device_common_path, log_callback)
+            if vince_samsung_path:
+                vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename, log_callback)
+                
+                # Validate constructed path
+                if not validate_depot_path(vince_rscmgr_path):
+                    vince_rscmgr_path = None
+        
+        if not vince_rscmgr_path:
+            error_msg = f"VINCE {vince_rscmgr_filename} not found in vendor/samsung paths"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("File Not Found", error_msg)
+            return
+        
+        # Map and sync VINCE rscmgr file
+        map_single_depot(vince_rscmgr_path, log_callback)
+        sync_file_silent(vince_rscmgr_path)
+        
+        log_callback(f"[OK] VINCE processing completed. Master rscmgr file: {vince_rscmgr_filename}")
 
-                response = messagebox.askyesno(
-                    "Processing Error",
-                    f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
-                )
+        if progress_callback:
+            progress_callback(60)
 
-                if not response:
-                    raise
-
+        # ============================================================================
+        # STEP 4: PROCESS ALL RESOLVED TARGETS
+        # ============================================================================
+        log_callback("\n[SYSTEM] Building target list from ALL resolved values...")
+        
+        # BUILD COMPLETE TARGET LIST from ALL resolved values
+        all_resolved_targets = []
+        
+        # Add BENI (mandatory - must exist after auto-resolve or original input)
+        if final_beni_input:
+            all_resolved_targets.append(("BENI", final_beni_input))
+        else:
+            error_msg = "BENI is mandatory and could not be resolved"
+            log_callback(f"[ERROR] {error_msg}")
+            if error_callback:
+                error_callback("Missing BENI", error_msg)
+            return
+        
+        # Add FLUMEN if resolved or originally provided
+        if final_flumen_input:
+            all_resolved_targets.append(("FLUMEN", final_flumen_input))
+        
+        # Add REL if resolved or originally provided  
+        if final_rel_input:
+            all_resolved_targets.append(("REL", final_rel_input))
+        
+        log_callback(f"[TARGETS] Processing {len(all_resolved_targets)} resolved targets: {[cat for cat, _ in all_resolved_targets]}")
+        
+        # Process ALL resolved targets
+        shared_changelist_id = None
+        progress_step = 40 / len(all_resolved_targets) if all_resolved_targets else 0
+        current_progress = 60
+        
+        for category, target_input in all_resolved_targets:
+            log_callback(f"\n[SYSTEM] Processing {category} target (device_common.mk + Android.mk + rscmgr.rc)...")
+            shared_changelist_id = process_target_workspace_enhanced(
+                target_input, category, vince_rscmgr_filename, vince_rscmgr_path, 
+                shared_changelist_id, log_callback
+            )
+            
+            if progress_callback:
+                current_progress += progress_step
+                progress_callback(int(current_progress))
+        
         if progress_callback:
             progress_callback(100)
-
+        
         # ============================================================================
-        # STEP 4: SUMMARY
+        # STEP 5: SUMMARY
         # ============================================================================
-        if log_callback:
-            log_callback("\n[READAHEAD] ========== PROCESS COMPLETED SUCCESSFULLY ==========")
-            log_callback(f"[SUMMARY] Rscmgr filename: {rscmgr_filename}")
-            log_callback(f"[SUMMARY] Resource=1 libraries: {len(resource1_libs)}")
-            log_callback(f"[SUMMARY] Resource=2 libraries: {len(resource2_libs)}")
-            log_callback(f"[SUMMARY] Changelist: {changelist_id}")
-            log_callback(f"[SUMMARY] Cascaded branches: {' → '.join(cascade_branches)}")
-
+        processed_targets = [cat for cat, _ in all_resolved_targets]
+        log_callback(f"\n[SYSTEM] Enhanced system bringup process completed successfully!")
+        log_callback(f"[SUMMARY] Processed ALL resolved targets: {', '.join(processed_targets)}")
+        log_callback(f"[SUMMARY] Master rscmgr file: {vince_rscmgr_filename}")
+        log_callback(f"[SUMMARY] Files processed per target:")
+        log_callback(f"[SUMMARY]   1. device_common.mk - rscmgr reference updated")
+        log_callback(f"[SUMMARY]   2. Android.mk - rscmgr module definition ensured")
+        log_callback(f"[SUMMARY]   3. rscmgr.rc - content synchronized with VINCE")
+        
+        if shared_changelist_id:
+            log_callback(f"[SUMMARY] All modifications across {len(processed_targets)} targets are in shared changelist: {shared_changelist_id}")
+        else:
+            log_callback(f"[SUMMARY] No modifications were needed - all {len(processed_targets)} targets are already in sync")
+        
     except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Readahead process failed: {str(e)}")
+        log_callback(f"[ERROR] Enhanced system process failed: {str(e)}")
         if error_callback:
-            error_callback("Readahead Process Error", str(e))
+            error_callback("System Process Error", str(e))
         if progress_callback:
             progress_callback(0)
-        raise

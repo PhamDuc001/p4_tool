@@ -16,8 +16,9 @@ from core.p4_operations import (
     sync_file_silent,
     checkout_file_silent,
     validate_depot_path,
+    find_device_common_mk_path
 )
-from processes.system_process import find_device_common_mk_path
+
 from config.p4_config import depot_to_local_path
 
 # All available asset apps

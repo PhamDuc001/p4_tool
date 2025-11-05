@@ -5,10 +5,9 @@ Enhanced to support mixed input (depot paths and workspaces)
 Updated logic: Compare properties first, then create changelist only when needed
 """
 from core.p4_operations import (
-    validate_depot_path, create_changelist, map_client, 
-    map_client_two_paths, sync_file, checkout_file,
-    resolve_workspace_to_device_common_path, is_workspace_like,
-    sync_file_silent
+    validate_depot_path,
+    map_client_two_paths, checkout_file_silent,
+    is_workspace_like, sync_file_silent, create_changelist_silent
 )
 from core.file_operations import (
     validate_properties_exist, update_lmkd_chimera,
@@ -92,7 +91,7 @@ def resolve_vendor_input_to_depot_path(user_input, log_callback=None):
             log_callback(f"[VENDOR] Detected workspace: {user_input}")
         
         try:
-            resolved_path = resolve_workspace_to_device_common_path(user_input)
+            resolved_path, _ = find_device_common_mk_path(user_input)
             if log_callback:
                 log_callback(f"[OK] Resolved workspace to device_common.mk: {resolved_path}")
             return resolved_path
@@ -324,7 +323,7 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
         log_callback(f"[STEP 7] Found {len(files_need_update)} files that need updates: {', '.join([f[0] for f in files_need_update])}")
         
         # Create single changelist for all updates
-        changelist_id = create_changelist(log_callback)
+        changelist_id = create_changelist_silent("Create Changelist for Bringup Process")
         
         if progress_callback: 
             progress_callback(80)
@@ -333,7 +332,7 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
         for target_name, target_depot, target_local in files_need_update:
             try:
                 # Checkout file
-                checkout_file(target_depot, changelist_id, log_callback)
+                checkout_file_silent(target_depot, changelist_id, log_callback)
                 
                 # Update properties
                 update_lmkd_chimera(vince_local, target_local, log_callback)
