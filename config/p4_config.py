@@ -5,7 +5,6 @@ Handles dynamic client name and workspace root detection
 import os
 import subprocess
 import re
-from P4 import P4, P4Exception
 # Global variables
 CLIENT_NAME = None
 WORKSPACE_ROOT = None
@@ -90,6 +89,60 @@ def refresh_p4_config():
         return True, f"P4 Config refreshed: Client={CLIENT_NAME}, Workspace={WORKSPACE_ROOT}"
     except Exception as e:
         return False, str(e)
+
+def check_p4_login_status():
+    """Check if user is logged into P4 using 'p4 login -s' command"""
+    try:
+        result = subprocess.run("p4 login -s", capture_output=True, text=True, shell=True)
+        
+        if result.returncode != 0:
+            return False
+            
+        output = result.stdout.strip()
+        
+        # If output starts with "User" -> logged in
+        # If output starts with "Perforce" -> not logged in
+        if output.startswith("User"):
+            return True
+        elif output.startswith("Perforce"):
+            return False
+        else:
+            # Unexpected output, assume not logged in
+            return False
+            
+    except Exception as e:
+        # Error running command, assume not logged in
+        return False
+
+def p4_login(password):
+    """Login to P4 with provided password"""
+    try:
+        # Run p4 login command with password
+        result = subprocess.run(
+            "p4 login", 
+            input=password, 
+            capture_output=True, 
+            text=True, 
+            shell=True
+        )
+        
+        if result.returncode != 0:
+            return False
+            
+        output = result.stdout.strip()
+        
+        # Check if login was successful
+        if output.endswith("logged in."):
+            return True
+        elif "Authentication failed." in output:
+            return False
+        else:
+            # Unexpected output, assume failed
+            return False
+            
+    except Exception as e:
+        # Error running command, assume failed
+        return False
 
 def get_p4_info_summary():
     """Get a summary of current P4 configuration for display purposes"""

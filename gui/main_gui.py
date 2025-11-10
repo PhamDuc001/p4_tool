@@ -5,14 +5,15 @@ Updated to support enhanced 3-path tuning functionality, System bringup, Readahe
 """
 
 import tkinter as tk
-from tkinter import ttk
-from config.p4_config import initialize_p4_config
+from tkinter import ttk, messagebox
+from config.p4_config import initialize_p4_config, check_p4_login_status, p4_login
 from gui.bringup_tab import BringupTab
 from gui.tuning_tab import TuningTab
 from gui.parse_tab import ParseTab
 from gui.readahead_tab import ReadaheadTab
 from gui.loadapkasset_tab import LoadApkAssetTab
 from gui.gui_utils import GUIUtils
+from gui.login_dialog import show_login_dialog
 
 
 class BringupToolGUI:
@@ -29,6 +30,12 @@ class BringupToolGUI:
 
         # Initialize P4 configuration silently
         initialize_p4_config()
+
+        # Check P4 login status and handle authentication
+        if not self.handle_p4_authentication():
+            # If authentication failed or user cancelled, exit
+            self.root.destroy()
+            return
 
         # Initialize GUI utilities
         self.gui_utils = GUIUtils(self.root)
@@ -169,6 +176,30 @@ class BringupToolGUI:
             self.readahead_tab.clear_all()
         elif self.current_mode.get() == "loadapkasset":
             self.loadapkasset_tab.clear_all()
+
+    def handle_p4_authentication(self):
+        """Handle P4 authentication with infinite retry logic"""
+        # Check if already logged in
+        if check_p4_login_status():
+            return True
+            
+        # Infinite retry loop for login
+        while True:
+            # Show login dialog
+            password, cancelled = show_login_dialog(self.root)
+            
+            # If user cancelled, exit application
+            if cancelled:
+                messagebox.showinfo("Application Exit", "P4 authentication is required to use this application.")
+                return False
+            
+            # Try to login with provided password
+            if p4_login(password):
+                # Login successful
+                return True
+            else:
+                # Login failed, show error and continue loop
+                messagebox.showerror("Login Failed", "Authentication failed. Please check your password and try again.")
 
     def run(self):
         """Start the GUI main loop"""
