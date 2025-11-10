@@ -138,84 +138,72 @@ def create_changelist_silent(description="Auto changelist"):
     return changelist_id
 
 
-def map_client_two_paths(target_depot, vince_depot, log_callback):
-    """Map two depots to client spec"""
+def _map_client_depots_core(depot_paths, log_callback=None, silent=False):
+    """
+    Core function for client depot mapping - INTERNAL USE ONLY
+    
+    Args:
+        depot_paths: List of depot paths to map
+        log_callback: Optional callback for logging
+        silent: If True, force silent mode regardless of log_callback
+    
+    Returns:
+        None
+    """
     client_name = get_client_name()
     if not client_name:
-        raise RuntimeError(
-            "Client name not initialized. Please check P4 configuration."
-        )
-
-    target_name = (
-        "BENI"
-        if "beni" in target_depot.lower()
-        else "FLUMEN" if "flumen" in target_depot.lower() else "TARGET"
-    )
-    log_callback(f"[STEP 2] Mapping {target_name} and VINCE to client spec...")
+        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
+    
+    # Build mapping line for each depot
+    mapping_lines = []
+    for depot_path in depot_paths:
+        mapping_lines.append(f"\t{depot_path}\t//{client_name}/{depot_path[2:]}")
+    
+    # Get current client spec
     client_spec = run_cmd("p4 client -o")
     lines = client_spec.splitlines()
+    
+    # Remove old mappings for any target depot
     new_lines = []
     for line in lines:
-        if target_depot in line or vince_depot in line:
-            continue
+        if any(depot in line for depot in depot_paths):
+            continue  # Remove old mapping
         new_lines.append(line)
-    new_lines.append(f"\t{target_depot}\t//{client_name}/{target_depot[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
+    
+    # Add new mappings
+    new_lines.extend(mapping_lines)
+    
+    # Update client spec
     new_spec = "\n".join(new_lines)
     run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
-
-
-def map_single_depot(depot_path, log_callback=None):
-    """Map single depot to client spec"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError(
-            "Client name not initialized. Please check P4 configuration."
-        )
-
-    depot_name = (
-        "BENI"
-        if "beni" in depot_path.lower()
-        else "FLUMEN" if "flumen" in depot_path.lower() else "DEPOT"
-    )
-    if log_callback:
-        log_callback(f"[MAPPING] Mapping {depot_name} to client spec...")
-
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot_path in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot_path}\t//{client_name}/{depot_path[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-
-    if log_callback:
+    
+    # Logging only if not silent
+    if not silent and log_callback:
+        if len(depot_paths) == 1:
+            depot_name = "BENI" if "beni" in depot_paths[0].lower() else "FLUMEN" if "flumen" in depot_paths[0].lower() else "DEPOT"
+            log_callback(f"[MAPPING] Mapping {depot_name} to client spec...")
+        elif len(depot_paths) == 2:
+            target_name = "BENI" if "beni" in depot_paths[0].lower() else "FLUMEN" if "flumen" in depot_paths[0].lower() else "TARGET"
+            log_callback(f"[STEP 2] Mapping {target_name} and VINCE to client spec...")
+        elif len(depot_paths) == 4:
+            log_callback("[STEP 2] Mapping BENI, VINCE, FLUMEN and REL to client spec...")
+        
         log_callback("[OK] Mapping completed.")
 
 
-def map_two_depots_silent(depot1, depot2):
-    """Map two depots to client spec without logging"""
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError(
-            "Client name not initialized. Please check P4 configuration."
-        )
+def map_client_two_paths(target_depot, vince_depot, log_callback):
+    """Map two depots to client spec - WRAPPER for backward compatibility"""
+    _map_client_depots_core([target_depot, vince_depot], log_callback)
 
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot1 in line or depot2 in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot1}\t//{client_name}/{depot1[2:]}")
-    new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
+
+def map_single_depot(depot_path, log_callback=None):
+    """Map single depot to client spec - WRAPPER for backward compatibility"""
+    _map_client_depots_core([depot_path], log_callback)
+
+
+def map_two_depots_silent(depot1, depot2):
+    """Map two depots to client spec without logging - WRAPPER for backward compatibility"""
+    _map_client_depots_core([depot1, depot2], silent=True)
 
 
 def sync_file_silent(depot_path):
@@ -410,7 +398,7 @@ def get_integration_source_depot_path(depot_path: str, log_callback) -> Optional
 
 def auto_resolve_vendor_branches(
     vince_input, beni_input, flumen_input, rel_input, log_callback
-):
+    ):
     """
     Auto-resolve missing vendor branches from integration history
 

@@ -7,7 +7,8 @@ Updated logic: Compare properties first, then create changelist only when needed
 from core.p4_operations import (
     validate_depot_path,
     map_client_two_paths, checkout_file_silent,
-    is_workspace_like, sync_file_silent, create_changelist_silent
+    is_workspace_like, sync_file_silent, create_changelist_silent,
+    find_device_common_mk_path
 )
 from core.file_operations import (
     validate_properties_exist, update_lmkd_chimera,
@@ -16,52 +17,14 @@ from core.file_operations import (
 from config.p4_config import depot_to_local_path
 
 def map_client_four_paths(beni_depot, vince_depot, flumen_depot, rel_depot, log_callback):
-    """Map four depots to client spec"""
-    from core.p4_operations import get_client_name, run_cmd
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    log_callback("[STEP 2] Mapping BENI, VINCE, FLUMEN and REL to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if beni_depot in line or vince_depot in line or flumen_depot in line or rel_depot in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{beni_depot}\t//{client_name}/{beni_depot[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_lines.append(f"\t{flumen_depot}\t//{client_name}/{flumen_depot[2:]}")
-    new_lines.append(f"\t{rel_depot}\t//{client_name}/{rel_depot[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
+    """Map four depots to client spec - WRAPPER for backward compatibility"""
+    from core.p4_operations import _map_client_depots_core
+    _map_client_depots_core([beni_depot, vince_depot, flumen_depot, rel_depot], log_callback)
 
 def map_client_three_paths(depot1, vince_depot, depot2, log_callback):
-    """Map three depots to client spec"""
-    from core.p4_operations import get_client_name, run_cmd
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    depot1_name = "BENI" if "beni" in depot1.lower() else "FLUMEN" if "flumen" in depot1.lower() else "REL" if "rel" in depot1.lower() else "DEPOT1"
-    depot2_name = "BENI" if "beni" in depot2.lower() else "FLUMEN" if "flumen" in depot2.lower() else "REL" if "rel" in depot2.lower() else "DEPOT2"
-    
-    log_callback(f"[STEP 2] Mapping {depot1_name}, VINCE and {depot2_name} to client spec...")
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot1 in line or vince_depot in line or depot2 in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot1}\t//{client_name}/{depot1[2:]}")
-    new_lines.append(f"\t{vince_depot}\t//{client_name}/{vince_depot[2:]}")
-    new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
-    log_callback("[OK] Mapping completed.")
+    """Map three depots to client spec - WRAPPER for backward compatibility"""
+    from core.p4_operations import _map_client_depots_core
+    _map_client_depots_core([depot1, vince_depot, depot2], log_callback)
 
 def resolve_vendor_input_to_depot_path(user_input, log_callback=None):
     """
