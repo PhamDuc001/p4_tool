@@ -13,7 +13,13 @@ from gui.main_gui import create_gui
 def check_p4_config():
     try:
         result = subprocess.run("p4 set", capture_output=True, text=True, shell=True)
-        return "P4EDITOR=C:\\Windows\\system32\\Notepad.exe (set)" in result.stdout
+        output_lines = result.stdout.strip().split('\n')
+        # print(output_lines)
+        if len(output_lines) == 1 and output_lines[0] == "P4EDITOR=C:\\Windows\\system32\\Notepad.exe (set)":
+            # print("P4 is not configured. Please configure it manually.")
+            return True
+        # print("P4 is configured.")
+        return False
     except Exception:
         return False
     
