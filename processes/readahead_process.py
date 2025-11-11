@@ -10,6 +10,8 @@ NEW: Added Android.mk processing support with module definition management
 import os
 import re
 import subprocess
+import tkinter as tk
+from tkinter import simpledialog, messagebox
 from P4 import P4, P4Exception
 from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
@@ -17,15 +19,86 @@ from core.p4_operations import (
     validate_device_common_mk_path, validate_depot_path,
     is_workspace_like, auto_resolve_missing_branches, find_device_common_mk_path
 )
+from processes.system_process import (
+    get_rscmgr_reference_from_device_common,
+    find_samsung_vendor_path_from_workspace,
+    add_rscmgr_reference_to_device_common,
+    find_android_mk_from_samsung_path,
+    check_rscmgr_in_android_mk,
+    add_rscmgr_module_to_android_mk,
+    construct_rscmgr_file_path,
+    update_device_common_mk_rscmgr_reference
+)
 from config.p4_config import depot_to_local_path
 
-def extract_model_from_rscmgr_filename(rscmgr_filename):
-    """Extract model name from rscmgr filename"""
-    # Extract model from rscmgr_mt6789.rc -> mt6789
-    match = re.search(r'rscmgr_(.+)\.rc$', rscmgr_filename)
-    if match:
-        return match.group(1)
-    return None
+
+def prompt_for_rscmgr_filename(log_callback=None):
+    """
+    Prompt user to input rscmgr filename when automatic detection fails
+    
+    Args:
+        log_callback: Function to log messages
+        
+    Returns:
+        str: User-provided rscmgr filename, or None if cancelled
+    """
+    if log_callback:
+        log_callback("[PROMPT] Rscmgr filename not found automatically, prompting user...")
+    
+    # Create a simple dialog to get user input
+    root = tk.Tk()
+    root.withdraw()  # Hide the main window
+    root.attributes('-topmost', True)  # Bring dialog to front
+    
+    try:
+        filename = simpledialog.askstring(
+            "Rscmgr Filename Required",
+            "Could not find rscmgr reference automatically.\n\n"
+            "Please enter the rscmgr filename (e.g., rscmgr.rc or rscmgr_vince.rc):",
+            initialvalue="rscmgr.rc",
+            parent=root
+        )
+        
+        if filename:
+            filename = filename.strip()
+            
+            # Validate the filename format
+            if not filename.endswith('.rc'):
+                if log_callback:
+                    log_callback(f"[ERROR] Invalid filename format: {filename} (must end with .rc)")
+                messagebox.showerror(
+                    "Invalid Filename",
+                    f"Filename must end with '.rc'\nGot: {filename}"
+                )
+                return prompt_for_rscmgr_filename(log_callback)  # Retry
+            
+            # Validate filename pattern (rscmgr*.rc)
+            if not re.match(r'^rscmgr.*\.rc$', filename):
+                if log_callback:
+                    log_callback(f"[ERROR] Invalid filename pattern: {filename} (should start with 'rscmgr')")
+                messagebox.showerror(
+                    "Invalid Filename", 
+                    f"Filename should start with 'rscmgr' and end with '.rc'\nGot: {filename}"
+                )
+                return prompt_for_rscmgr_filename(log_callback)  # Retry
+            
+            if log_callback:
+                log_callback(f"[OK] User provided rscmgr filename: {filename}")
+            
+            return filename
+        else:
+            if log_callback:
+                log_callback("[CANCELLED] User cancelled rscmgr filename input")
+            return None
+            
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to prompt for rscmgr filename: {str(e)}")
+        messagebox.showerror("Error", f"Failed to get input: {str(e)}")
+        return None
+    finally:
+        root.destroy()
+
 
 def resolve_input_to_device_common_path(user_input, log_callback=None):
     """
@@ -75,263 +148,15 @@ def resolve_input_to_device_common_path(user_input, log_callback=None):
         raise RuntimeError(f"Input must be either device_common.mk depot path (//depot/...) or workspace (TEMPLATE_*): {user_input}")
 
 
-# Need check
-#=============================
-#=============================
-
-
-def find_samsung_vendor_path_from_workspace(workspace_name, log_callback=None):
-    """Find vendor/samsung base path from workspace"""
-    try:
-        _, view_paths = find_device_common_mk_path(workspace_name, log_callback)
-        
-        for view_path in view_paths:
-            if "/vendor/samsung/" in view_path:
-                match = re.search(r"(.+/vendor/samsung/)", view_path)
-                if match:
-                    samsung_path = match.group(1)
-                    if log_callback:
-                        log_callback(f"[FOUND] Samsung vendor path: {samsung_path}")
-                    return samsung_path
-        
-        if log_callback:
-            log_callback("[NOT_FOUND] No vendor/samsung path found in workspace")
+def find_rscmgr_file_path(workspace, rscmgr_filename, log_callback=None):
+    samsung_path = find_samsung_vendor_path_from_workspace(workspace)
+    if not samsung_path:
+        if(log_callback):
+            log_callback(f"[ERROR] Could not find Samsung vendor path for workspace: {workspace}")
         return None
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error finding samsung path: {str(e)}")
-        return None
-
-
-def find_samsung_vendor_path_from_device_common(device_common_path, log_callback=None):
-    """Construct samsung vendor path from device_common.mk path"""
-    try:
-        # Extract base path from device_common.mk path
-        # Pattern: //depot/.../vendor/samsung/device/model_common/device_common.mk
-        # Extract: //depot/.../vendor/samsung/
-        match = re.search(r'^(.+/vendor/samsung/)', device_common_path)
-        if match:
-            samsung_path = match.group(1)
-            if log_callback:
-                log_callback(f"[CONSTRUCTED] Samsung vendor path: {samsung_path}")
-            return samsung_path
-        
-        if log_callback:
-            log_callback("[ERROR] Cannot extract samsung path from device_common.mk path")
-        return None
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error constructing samsung path: {str(e)}")
-        return None
-
-
-def find_android_mk_from_samsung_path(samsung_path, log_callback=None):
-    """Find Android.mk in samsung vendor path"""
-    android_mk_path = f"{samsung_path}system/rscmgr/Android.mk"
-    
-    if validate_depot_path(android_mk_path):
-        if log_callback:
-            log_callback(f"[FOUND] Android.mk: {android_mk_path}")
-        return android_mk_path
-    
-    if log_callback:
-        log_callback(f"[NOT_FOUND] Android.mk not found: {android_mk_path}")
-    return None
-
-
-def check_rscmgr_in_android_mk(android_mk_path, rscmgr_filename, log_callback=None):
-    """Check if rscmgr module already exists in Android.mk"""
-    try:
-        local_path = depot_to_local_path(android_mk_path)
-
-        with open(local_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check for LOCAL_MODULE := rscmgr_filename
-        if f"LOCAL_MODULE := {rscmgr_filename}" in content:
-            if log_callback:
-                log_callback("[INFO] rscmgr module already exists in Android.mk")
-            return True
-
-        return False
-
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error checking Android.mk: {str(e)}")
-        return False
-
-
-def add_rscmgr_module_to_android_mk(android_mk_path, rscmgr_filename, changelist_id, log_callback=None):
-    """Add rscmgr module definition to Android.mk"""
-    try:
-        local_path = depot_to_local_path(android_mk_path)
-
-        # Check if module already exists
-        if check_rscmgr_in_android_mk(android_mk_path, rscmgr_filename, log_callback):
-            return
-
-        # Checkout Android.mk
-        checkout_file_silent(android_mk_path, changelist_id, log_callback)
-
-        with open(local_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Build module block with proper formatting
-        module_block = (
-            "\ninclude $(CLEAR_VARS)\n"
-            f"LOCAL_MODULE := {rscmgr_filename}\n"
-            "LOCAL_MODULE_TAGS := optional\n"
-            "LOCAL_MODULE_CLASS := ETC\n"
-            "LOCAL_MODULE_PATH := $(TARGET_OUT)/etc/init\n"
-            "LOCAL_SRC_FILES := $(LOCAL_MODULE)\n"
-            "include $(BUILD_PREBUILT)\n"
-        )
-
-        # Append to file
-        with open(local_path, "a", encoding="utf-8") as f:
-            f.write(module_block)
-
-        if log_callback:
-            log_callback("[OK] Added rscmgr module to Android.mk")
-
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to add module to Android.mk: {str(e)}")
-        raise
-
-
-def construct_rscmgr_file_path(samsung_path, rscmgr_filename, log_callback=None):
-    """
-    Construct rscmgr file path by appending system/rscmgr/{rscmgr_filename}
-    """
-    rscmgr_path = f"{samsung_path}system/rscmgr/{rscmgr_filename}"
+    rscmgr_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename)
     return rscmgr_path
-
-
-def find_rscmgr_file_in_samsung_paths(samsung_paths, rscmgr_filename, log_callback=None):
-    """
-    Find rscmgr file in samsung vendor paths using new construction logic
-    Returns the depot path to the rscmgr file if found
-    """
-    if log_callback:
-        log_callback(f"[SYSTEM] Searching for {rscmgr_filename} in filtered samsung paths...")
     
-    for samsung_path in samsung_paths:
-        # Construct rscmgr file path
-        rscmgr_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename, log_callback)
-        
-        # Validate if file exists using p4 files command
-        try:
-            result = subprocess.run(
-                f"p4 files {rscmgr_path}", 
-                capture_output=True, 
-                text=True, 
-                shell=True
-            )
-            
-            if result.returncode == 0 and "no such file" not in result.stderr.lower():
-                if log_callback:
-                    log_callback(f"[OK] Found rscmgr file: {rscmgr_path}")
-                return rscmgr_path
-                
-        except Exception:
-            continue
-    
-    if log_callback:
-        log_callback(f"[WARNING] {rscmgr_filename} not found in any filtered samsung vendor paths")
-    
-    return None
-
-
-def get_rscmgr_reference_from_device_common(device_common_path, log_callback=None):
-    """
-    Get rscmgr file reference from device_common.mk
-    Returns the rscmgr filename if found, None otherwise
-    """
-    try:
-        local_path = depot_to_local_path(device_common_path)
-        
-        with open(local_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Look for rscmgr.rc or rscmgr_{model}.rc pattern
-        rscmgr_match = re.search(r'rscmgr(?:_\w+)?\.rc', content)
-        
-        if rscmgr_match:
-            return rscmgr_match.group(0)
-        
-        return None
-        
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error reading device_common.mk: {str(e)}")
-        return None
-
-
-def update_device_common_mk_rscmgr_reference(device_common_path, old_rscmgr_filename, new_rscmgr_filename, log_callback=None):
-    """
-    Update rscmgr file reference in device_common.mk
-    """
-    if log_callback:
-        log_callback(f"[SYSTEM] Updating device_common.mk: {old_rscmgr_filename} → {new_rscmgr_filename}")
-    
-    try:
-        local_path = depot_to_local_path(device_common_path)
-        
-        # Read current content
-        with open(local_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Replace old rscmgr filename with new one
-        updated_content = content.replace(old_rscmgr_filename, new_rscmgr_filename)
-        
-        # Write updated content
-        with open(local_path, 'w', encoding='utf-8') as f:
-            f.write(updated_content)
-        
-        if log_callback:
-            log_callback(f"[OK] Updated device_common.mk rscmgr reference")
-            
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to update device_common.mk: {str(e)}")
-        raise
-
-
-def add_rscmgr_reference_to_device_common(device_common_path, rscmgr_filename, log_callback=None):
-    """
-    Add rscmgr file reference to device_common.mk if not exists
-    """
-    if log_callback:
-        log_callback(f"[SYSTEM] Adding rscmgr reference to device_common.mk: {rscmgr_filename}")
-    
-    try:
-        local_path = depot_to_local_path(device_common_path)
-        
-        # Read current content
-        with open(local_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        # Add rscmgr reference at the end
-        lines.append('\n')  # Add empty line
-        lines.append('# Rscmgr \n')
-        lines.append('PRODUCT_PACKAGES += \\\n')
-        lines.append(f'    {rscmgr_filename}\n')
-        
-        # Write updated content
-        with open(local_path, 'w', encoding='utf-8') as f:
-            f.writelines(lines)
-        
-        if log_callback:
-            log_callback(f"[OK] Added rscmgr reference to device_common.mk")
-            
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Failed to add rscmgr reference: {str(e)}")
-        raise
-
 
 def copy_rscmgr_content(source_path, target_path, log_callback=None):
     """
@@ -483,11 +308,7 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
         if is_workspace_like(workspace_or_path):
             samsung_path = find_samsung_vendor_path_from_workspace(workspace_or_path, log_callback)
         
-        # Fallback: construct from device_common path
-        if not samsung_path:
-            if log_callback:
-                log_callback("[FALLBACK] Constructing samsung path from device_common.mk path...")
-            samsung_path = find_samsung_vendor_path_from_device_common(device_common_path, log_callback)
+        
         
         if not samsung_path:
             if log_callback:
@@ -582,7 +403,7 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
             log_callback(f"[{category}] Processing rscmgr.rc...")
         
         # Find rscmgr file path
-        target_rscmgr_path = construct_rscmgr_file_path(samsung_path, vince_rscmgr_filename, log_callback)
+        target_rscmgr_path = construct_rscmgr_file_path(samsung_path, vince_rscmgr_filename)
         
         if validate_depot_path(target_rscmgr_path):
             # File exists - check content
@@ -736,25 +557,12 @@ def run_readahead_process(beni_input, vince_input, flumen_input, rel_input,
             try:
                 vince_samsung_path = find_samsung_vendor_path_from_workspace(final_vince_input, log_callback)
                 if vince_samsung_path:
-                    vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename, log_callback)
+                    vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename)
                     if not validate_depot_path(vince_rscmgr_path):
                         vince_rscmgr_path = None
             except Exception as e:
                 if log_callback:
                     log_callback(f"[WARNING] Workspace-based rscmgr search failed: {str(e)}")
-        
-        # Fallback: construct from device_common path
-        if not vince_rscmgr_path:
-            if log_callback:
-                log_callback("[FALLBACK] Constructing VINCE rscmgr path from device_common.mk...")
-            
-            vince_samsung_path = find_samsung_vendor_path_from_device_common(vince_device_common_path, log_callback)
-            if vince_samsung_path:
-                vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename, log_callback)
-                
-                # Validate constructed path
-                if not validate_depot_path(vince_rscmgr_path):
-                    vince_rscmgr_path = None
         
         if not vince_rscmgr_path:
             error_msg = f"VINCE {vince_rscmgr_filename} not found in vendor/samsung paths"
@@ -823,6 +631,7 @@ def run_readahead_process(beni_input, vince_input, flumen_input, rel_input,
         # STEP 5: SUMMARY
         # ============================================================================
         processed_targets = [cat for cat, _ in all_resolved_targets]
+        
         log_callback(f"\n[SYSTEM] Enhanced system bringup process completed successfully!")
         log_callback(f"[SUMMARY] Processed ALL resolved targets: {', '.join(processed_targets)}")
         log_callback(f"[SUMMARY] Master rscmgr file: {vince_rscmgr_filename}")

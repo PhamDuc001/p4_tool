@@ -53,26 +53,6 @@ def find_samsung_vendor_path_from_workspace(workspace_name, log_callback=None):
         return None
 
 
-def find_samsung_vendor_path_from_device_common(device_common_path, log_callback=None):
-    """Construct samsung vendor path from device_common.mk path"""
-    try:
-        match = re.search(r'^(.+/vendor/samsung/)', device_common_path)
-        if match:
-            samsung_path = match.group(1)
-            if log_callback:
-                log_callback(f"[CONSTRUCTED] Samsung vendor path: {samsung_path}")
-            return samsung_path
-        
-        if log_callback:
-            log_callback("[ERROR] Cannot extract samsung path from device_common.mk path")
-        return None
-    
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[ERROR] Error constructing samsung path: {str(e)}")
-        return None
-
-
 def find_android_mk_from_samsung_path(samsung_path, log_callback=None):
     """Find Android.mk in samsung vendor path"""
     android_mk_path = f"{samsung_path}system/rscmgr/Android.mk"
@@ -339,10 +319,7 @@ def process_vince_reference(vince_workspace, log_callback=None):
             log_callback(f"[VINCE] rscmgr filename: {rscmgr_filename}")
         
         # Find samsung vendor path
-        samsung_path = find_samsung_vendor_path_from_workspace(vince_workspace, log_callback)
-        if not samsung_path:
-            samsung_path = find_samsung_vendor_path_from_device_common(device_common_path, log_callback)
-        
+        samsung_path = find_samsung_vendor_path_from_workspace(vince_workspace, log_callback) 
         if not samsung_path:
             raise RuntimeError("Cannot find samsung vendor path in VINCE")
         
@@ -410,9 +387,7 @@ def process_target_branch(branch_input, branch_name, vince_rscmgr_filename,
             
             # Find samsung path
             samsung_path = find_samsung_vendor_path_from_workspace(branch_input, log_callback)
-            if not samsung_path:
-                samsung_path = find_samsung_vendor_path_from_device_common(device_common_path, log_callback)
-            
+     
             if not samsung_path:
                 raise RuntimeError(f"Cannot find samsung vendor path in {branch_name}")
             
