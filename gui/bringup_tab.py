@@ -1,9 +1,9 @@
 """
-Bringup tab implementation
+Bringup tab implementation - FIXED VERSION
 Handles the bringup mode UI and functionality
 Enhanced to support mixed input (depot paths and workspaces)
 Updated to handle info messages for no differences scenario
-Enhanced with auto-resolve cascading functionality
+FIXED: Auto-resolve validation now works with resolved targets
 """
 
 import tkinter as tk
@@ -12,10 +12,11 @@ import threading
 from config.p4_config import get_client_name, get_workspace_root
 from processes.bringup_process import run_bringup_process
 from processes.system_process import run_system_process
+from core.p4_operations import auto_resolve_vendor_branches
 
 
 class BringupTab:
-    """Bringup tab component with Vendor and System sections supporting mixed input and auto-resolve"""
+    """Bringup tab component with Vendor and System sections supporting mixed input and FIXED auto-resolve"""
 
     def __init__(self, parent, gui_utils):
         self.parent = parent
@@ -87,9 +88,9 @@ class BringupTab:
         self.vendor_start_btn.pack(side="right")
 
         # ============================================================================
-        # SYSTEM SECTION (Enhanced to support both workspaces and depot paths + Auto-resolve)
+        # SYSTEM SECTION (FIXED Auto-resolve + Enhanced Samsung Path Filtering)
         # ============================================================================
-        system_frame = ttk.LabelFrame(main_container, text="System (Auto-resolve enabled)", padding=10)
+        system_frame = ttk.LabelFrame(main_container, text="System", padding=10)
         system_frame.pack(fill="x", pady=(0, 10))
 
         # BENI Workspace/Path
@@ -184,7 +185,7 @@ class BringupTab:
 
         self.log_callback("[INFO] All fields and logs cleared.")
         self.gui_utils.update_status(
-            "Mode: Bring up - Vendor/System: depot paths or workspaces (TEMPLATE_*)"
+            "Mode: Bring up - Vendor/System: depot paths or workspaces (TEMPLATE_*) with FIXED auto-resolve"
         )
 
     def _validate_vendor_input(self, user_input, field_name):
@@ -208,8 +209,8 @@ class BringupTab:
         # Check if it's a workspace
         elif user_input.upper().startswith("TEMPLATE"):
             try:
-                from core.p4_operations import resolve_workspace_to_device_common_path
-                resolved_path = resolve_workspace_to_device_common_path(user_input)
+                from core.p4_operations import find_device_common_mk_path
+                resolved_path, _= find_device_common_mk_path(user_input)
                 return True, resolved_path, None
             except Exception as e:
                 return False, "", f"{field_name} workspace resolution failed: {str(e)}"
@@ -242,8 +243,8 @@ class BringupTab:
         # Check if it's a workspace
         elif user_input.upper().startswith("TEMPLATE"):
             try:
-                from core.p4_operations import resolve_workspace_to_device_common_path
-                resolved_path = resolve_workspace_to_device_common_path(user_input)
+                from core.p4_operations import find_device_common_mk_path
+                resolved_path, _ = find_device_common_mk_path(user_input)
                 return True, user_input, None  # Keep original workspace for system processing
             except Exception as e:
                 return False, "", f"{field_name} workspace resolution failed: {str(e)}"
@@ -266,47 +267,112 @@ class BringupTab:
         return error_callback
 
     def on_vendor_start(self):
-        """Handle vendor bringup start button click (enhanced to support mixed input)"""
+        """Handle vendor bringup start button click with auto-resolve functionality"""
         beni_input = self.beni_entry.get().strip()
         vince_input = self.vince_entry.get().strip()
         flumen_input = self.flumen_entry.get().strip()
         rel_input = self.rel_entry.get().strip()
 
         # Validate VINCE (mandatory)
-        is_valid, vince_path, error_msg = self._validate_vendor_input(vince_input, "VINCE")
-        if not is_valid or not vince_path:
+        if not vince_input:
             messagebox.showerror(
                 "Invalid Input",
-                error_msg or "VINCE is mandatory and must be depot path (//depot/...) or workspace (TEMPLATE_*)",
+                "VINCE is mandatory and must be depot path (//depot/...) or workspace (TEMPLATE_*)",
             )
             return
 
-        # Validate optional targets
+        # ============================================================================
+        # VENDOR AUTO-RESOLVE FUNCTIONALITY
+        # ============================================================================
+        try:
+            from core.p4_operations import auto_resolve_vendor_branches
+            
+            # Check if auto-resolve is needed (not all fields are provided)
+            all_fields_provided = beni_input and vince_input and flumen_input and rel_input
+            auto_resolve_needed = not all_fields_provided
+            
+            if auto_resolve_needed:
+                self.log_callback("[VENDOR] Starting auto-resolve for missing branches...")
+                self.log_callback("[AUTO-RESOLVE] Using vendor-specific auto-resolve logic")
+                
+                # Call vendor auto-resolve function
+                resolved_beni, resolved_vince, resolved_flumen, resolved_rel = auto_resolve_vendor_branches(
+                    vince_input, beni_input, flumen_input, rel_input, self.log_callback
+                )
+                
+                # Update resolved inputs
+                final_beni_input = resolved_beni if resolved_beni else beni_input
+                final_vince_input = resolved_vince if resolved_vince else vince_input
+                final_flumen_input = resolved_flumen if resolved_flumen else flumen_input
+                final_rel_input = resolved_rel if resolved_rel else rel_input
+                
+                # Log final inputs after auto-resolve
+                self.log_callback("[AUTO-RESOLVE] Using final resolved inputs for vendor processing:")
+                self.log_callback(f"[FINAL] VINCE: {final_vince_input}")
+                self.log_callback(f"[FINAL] BENI: {final_beni_input if final_beni_input else '(not provided)'}")
+                self.log_callback(f"[FINAL] FLUMEN: {final_flumen_input if final_flumen_input else '(not provided)'}")
+                self.log_callback(f"[FINAL] REL: {final_rel_input if final_rel_input else '(not provided)'}")
+                
+            else:
+                self.log_callback("[AUTO-RESOLVE] All fields provided - skipping auto-resolve")
+                # Use original inputs
+                final_beni_input = beni_input
+                final_vince_input = vince_input
+                final_flumen_input = flumen_input
+                final_rel_input = rel_input
+                
+        except Exception as e:
+            error_msg = f"Vendor auto-resolve failed: {str(e)}"
+            self.log_callback(f"[ERROR] {error_msg}")
+            messagebox.showerror("Auto-resolve Failed", error_msg)
+            return
+
+        # ============================================================================
+        # VALIDATE FINAL RESOLVED INPUTS
+        # ============================================================================
+        # Validate VINCE with resolved input
+        is_valid, vince_path, error_msg = self._validate_vendor_input(final_vince_input, "VINCE")
+        if not is_valid or not vince_path:
+            messagebox.showerror(
+                "Invalid Input",
+                error_msg or "VINCE validation failed after auto-resolve",
+            )
+            return
+
+        # Validate resolved targets
         valid_targets = []
-        beni_path = flumen_path = rel_path = ""
+        final_beni_path = final_flumen_path = final_rel_path = ""
         
-        if beni_input:
-            is_valid, beni_path, error_msg = self._validate_vendor_input(beni_input, "BENI")
+        if final_beni_input:
+            is_valid, final_beni_path, error_msg = self._validate_vendor_input(final_beni_input, "BENI")
             if not is_valid:
-                messagebox.showerror("Invalid Input", error_msg)
-                return
-            if beni_path:
+                # Log warning but don't stop process if auto-resolved BENI fails validation
+                if beni_input != final_beni_input:  # This was auto-resolved
+                    self.log_callback(f"[WARNING] Auto-resolved BENI validation failed: {error_msg}")
+                else:
+                    messagebox.showerror("Invalid Input", error_msg)
+                    return
+            elif final_beni_path:
                 valid_targets.append("BENI")
 
-        if flumen_input:
-            is_valid, flumen_path, error_msg = self._validate_vendor_input(flumen_input, "FLUMEN")
+        if final_flumen_input:
+            is_valid, final_flumen_path, error_msg = self._validate_vendor_input(final_flumen_input, "FLUMEN")
             if not is_valid:
-                messagebox.showerror("Invalid Input", error_msg)
-                return
-            if flumen_path:
+                # Log warning but don't stop process if auto-resolved FLUMEN fails validation
+                if flumen_input != final_flumen_input:  # This was auto-resolved
+                    self.log_callback(f"[WARNING] Auto-resolved FLUMEN validation failed: {error_msg}")
+                else:
+                    messagebox.showerror("Invalid Input", error_msg)
+                    return
+            elif final_flumen_path:
                 valid_targets.append("FLUMEN")
 
-        if rel_input:
-            is_valid, rel_path, error_msg = self._validate_vendor_input(rel_input, "REL")
+        if final_rel_input:
+            is_valid, final_rel_path, error_msg = self._validate_vendor_input(final_rel_input, "REL")
             if not is_valid:
                 messagebox.showerror("Invalid Input", error_msg)
                 return
-            if rel_path:
+            elif final_rel_path:
                 valid_targets.append("REL")
 
         if not valid_targets:
@@ -316,11 +382,14 @@ class BringupTab:
             )
             return
 
-        # Run vendor process
-        self._run_vendor_process(beni_path, vince_path, flumen_path, rel_path)
+        # Log summary of what will be processed
+        self.log_callback(f"[VENDOR] Will process {len(valid_targets)} targets: {', '.join(valid_targets)}")
+
+        # Run vendor process with resolved paths
+        self._run_vendor_process(final_beni_path, vince_path, final_flumen_path, final_rel_path)
 
     def on_system_start(self):
-        """Handle system bringup start button click with auto-resolve functionality"""
+        """FIXED: Handle system bringup with proper auto-resolve validation"""
         beni_input = self.beni_workspace_entry.get().strip()
         vince_input = self.vince_workspace_entry.get().strip()
         flumen_input = self.flumen_workspace_entry.get().strip()
@@ -328,10 +397,7 @@ class BringupTab:
 
         # Validate VINCE (mandatory)
         if not vince_input:
-            messagebox.showerror(
-                "Invalid Input",
-                "VINCE is mandatory for system bringup",
-            )
+            messagebox.showerror("Invalid Input", "VINCE is mandatory for system bringup")
             return
 
         # Basic validation of VINCE input format
@@ -340,81 +406,58 @@ class BringupTab:
             messagebox.showerror("Invalid Input", error_msg)
             return
 
-        # AUTO-RESOLVE MISSING BRANCHES
+        # ============================================================================
+        # AUTO-RESOLVE MISSING BRANCHES - FIXED TO WORK WITH system_process.py
+        # ============================================================================
         try:
             from core.p4_operations import auto_resolve_missing_branches
             
-            self.log_callback("[SYSTEM] Starting auto-resolve for missing branches...")
+            self.log_callback("[SYSTEM] Starting FIXED auto-resolve for missing branches...")
+            self.log_callback("[AUTO-RESOLVE] Using FIXED integration history parsing with p4 filelog -i <path>#1")
             
             # Call auto-resolve function
             resolved_beni, resolved_flumen, resolved_rel, resolved_vince = auto_resolve_missing_branches(
                 vince_input, flumen_input, beni_input, rel_input, self.log_callback
             )
             
-            # Update resolved inputs
+            # Update final inputs with resolved values
             final_beni_input = resolved_beni if resolved_beni else beni_input
             final_vince_input = resolved_vince if resolved_vince else vince_input
             final_flumen_input = resolved_flumen if resolved_flumen else flumen_input
             final_rel_input = resolved_rel if resolved_rel else rel_input
             
-            # Log final inputs after auto-resolve
+            # FIXED: Check if we have at least one target after auto-resolve (not just BENI)
+            targets_available = []
+            if final_beni_input:
+                targets_available.append("BENI")
+            if final_flumen_input:
+                targets_available.append("FLUMEN")
+            if final_rel_input:
+                targets_available.append("REL")
+            
+            if not targets_available:
+                messagebox.showerror(
+                    "Invalid Input",
+                    "At least one target (BENI, FLUMEN, or REL) must be provided or auto-resolvable",
+                )
+                return
+            
+            # Log final resolved inputs
             self.log_callback("[AUTO-RESOLVE] Using final resolved inputs for system processing:")
             self.log_callback(f"[FINAL] VINCE: {final_vince_input}")
-            self.log_callback(f"[FINAL] BENI: {final_beni_input if final_beni_input else '(not provided)'}")
-            self.log_callback(f"[FINAL] FLUMEN: {final_flumen_input if final_flumen_input else '(not provided)'}")
-            self.log_callback(f"[FINAL] REL: {final_rel_input if final_rel_input else '(not provided)'}")
+            self.log_callback(f"[FINAL] BENI: {final_beni_input if final_beni_input else '(not available)'}")
+            self.log_callback(f"[FINAL] FLUMEN: {final_flumen_input if final_flumen_input else '(not available)'}")
+            self.log_callback(f"[FINAL] REL: {final_rel_input if final_rel_input else '(not available)'}")
+            self.log_callback(f"[TARGETS] Will process {len(targets_available)} targets: {', '.join(targets_available)}")
             
         except Exception as e:
-            error_msg = f"Auto-resolve failed: {str(e)}"
+            error_msg = f"FIXED Auto-resolve failed: {str(e)}"
             self.log_callback(f"[ERROR] {error_msg}")
             messagebox.showerror("Auto-resolve Failed", error_msg)
             return
 
-        # Validate final resolved inputs
-        # VINCE validation
-        is_valid, vince_resolved, error_msg = self._validate_system_input(final_vince_input, "VINCE")
-        if not is_valid or not vince_resolved:
-            messagebox.showerror(
-                "Invalid Input",
-                error_msg or "VINCE validation failed after auto-resolve",
-            )
-            return
-
-        # BENI validation - now may be auto-resolved so check if it exists
-        final_beni_resolved = ""
-        if final_beni_input:
-            is_valid, final_beni_resolved, error_msg = self._validate_system_input(final_beni_input, "BENI")
-            if not is_valid:
-                messagebox.showerror("Invalid Input", error_msg)
-                return
-        
-        # Check if we have either original BENI or auto-resolved BENI
-        if not final_beni_input:
-            messagebox.showerror(
-                "Invalid Input",
-                "BENI is mandatory for system bringup and could not be auto-resolved",
-            )
-            return
-
-        # Validate optional resolved targets
-        final_flumen_resolved = final_rel_resolved = ""
-        
-        if final_flumen_input:
-            is_valid, final_flumen_resolved, error_msg = self._validate_system_input(final_flumen_input, "FLUMEN")
-            if not is_valid:
-                messagebox.showerror("Invalid Input", error_msg)
-                return
-
-        if final_rel_input:
-            is_valid, final_rel_resolved, error_msg = self._validate_system_input(final_rel_input, "REL")
-            if not is_valid:
-                messagebox.showerror("Invalid Input", error_msg)
-                return
-
-        # Run system process with resolved inputs
-        self._run_system_process(
-            final_beni_input, final_vince_input, final_flumen_input, final_rel_input
-        )
+        # Run FIXED system process with ALL resolved inputs
+        self._run_system_process(final_beni_input, final_vince_input, final_flumen_input, final_rel_input)
 
     def _run_vendor_process(self, beni_path, vince_path, flumen_path, rel_path):
         """Run vendor bringup process in separate thread (enhanced functionality)"""
@@ -462,7 +505,7 @@ class BringupTab:
         thread.start()
 
     def _run_system_process(self, beni_input, vince_input, flumen_input, rel_input):
-        """Run system bringup process in separate thread with auto-resolve support"""
+        """Run FIXED system bringup process that processes ALL auto-resolved targets"""
         # Clear log and reset progress
         self.gui_utils.clear_text_widget(self.log_text)
         self.gui_utils.reset_progress(self.system_progress)
@@ -474,12 +517,20 @@ class BringupTab:
             self.log_callback(f"[CONFIG] Using P4 Client: {client_name}")
             self.log_callback(f"[CONFIG] Using Workspace: {workspace_root}")
 
+        # Log enhancement info
+        self.log_callback("[SYSTEM] Using FIXED system process with:")
+        self.log_callback("[ENHANCEMENT] FIXED auto-resolve with correct p4 filelog -i <path>#1 parsing")
+        self.log_callback("[ENHANCEMENT] FIXED target processing - ALL auto-resolved targets will be processed")
+        self.log_callback("[ENHANCEMENT] Enhanced Samsung vendor path filtering with priority logic")
+        self.log_callback("[ENHANCEMENT] Mixed input support (depot paths + workspaces)")
+        self.log_callback("[ENHANCEMENT] Improved workspace resolution using parse_process.py approach")
+
         # Disable start button during processing
         self.system_start_btn.configure(state="disabled")
 
         def run_process_thread():
             try:
-                self.gui_utils.update_status("Processing: Running system bring up operation with auto-resolve...")
+                self.gui_utils.update_status("Processing: Running FIXED system bring up with ALL auto-resolved targets...")
                 run_system_process(
                     beni_input,
                     vince_input,
@@ -496,7 +547,7 @@ class BringupTab:
                 )
                 self.gui_utils.root.after(
                     0,
-                    lambda: self.gui_utils.update_status("Mode: Bring up - System operation completed"),
+                    lambda: self.gui_utils.update_status("Mode: Bring up - FIXED System operation completed"),
                 )
 
         # Start the process in a separate thread

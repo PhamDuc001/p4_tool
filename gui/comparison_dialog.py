@@ -186,7 +186,7 @@ class ComparisonDialog:
                 
                 # Highlight different values
                 if not all_same:
-                    self.comparison_tree.set(item, "Category", "⚠️ LMKD")
+                    self.comparison_tree.set(item, "Category", "LMKD")
         
         # Add Chimera properties
         if all_properties["Chimera"]:

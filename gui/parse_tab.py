@@ -8,7 +8,6 @@ from tkinter import ttk, messagebox
 import threading
 from processes.parse_process import (
     parse_multiple_workspaces, 
-    validate_workspace_exists,
     refresh_adb_devices,
     connect_to_device,
     calculate_library_sizes
@@ -81,6 +80,8 @@ class ExportDialog:
         self.text_widget.insert("1.0", library_text)
         self.text_widget.configure(state="normal")  # Keep editable for user convenience
 
+        
+
         # Button frame
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill="x", pady=(10, 0))
@@ -151,7 +152,7 @@ class ParseTab:
         """Create content for parse mode"""
         # Parse input section
         parse_input_frame = ttk.LabelFrame(
-            self.frame, text="Workspace Parsing", padding=10
+            self.frame, text="Workspace Parsing to file device_common path", padding=10
         )
         parse_input_frame.pack(fill="x", pady=(0, 10))
 
@@ -253,11 +254,11 @@ class ParseTab:
         self.connect_button.pack(side="left")
 
         # Connection status label
-        self.connection_status = tk.StringVar(value="Not connected")
-        status_label = ttk.Label(
-            device_frame, textvariable=self.connection_status, foreground="red"
+        self.connection_status_var = tk.StringVar(value="Not connected")
+        self.connection_status_label = ttk.Label(
+            device_frame, textvariable=self.connection_status_var, foreground="red"
         )
-        status_label.pack(side="left", padx=(10, 0))
+        self.connection_status_label.pack(side="left", padx=(10, 0))
 
         # Library input frame
         input_frame = ttk.Frame(library_frame)
@@ -310,7 +311,7 @@ class ParseTab:
         table_frame.pack(fill="both", expand=True, pady=(10, 0))
 
         # Create treeview for results
-        columns = ("Library", "Size (KB)", "Size (Bytes)")
+        columns = ("Library", "Size (KB)", "Size (MB)")
         self.results_tree = ttk.Treeview(
             table_frame, columns=columns, show="headings", height=10
         )
@@ -322,8 +323,8 @@ class ParseTab:
         self.results_tree.heading("Size (KB)", text="Size (KB)")
         self.results_tree.column("Size (KB)", width=100, anchor="e")
 
-        self.results_tree.heading("Size (Bytes)", text="Size (Bytes)")
-        self.results_tree.column("Size (Bytes)", width=120, anchor="e")
+        self.results_tree.heading("Size (MB)", text="Size (MB)")
+        self.results_tree.column("Size (MB)", width=120, anchor="e")
 
         # Scrollbars for results table
         results_v_scrollbar = ttk.Scrollbar(
@@ -429,9 +430,17 @@ class ParseTab:
         
         for item in self.results_tree.get_children():
             values = self.results_tree.item(item, "values")
-            if len(values) >= 1 and values[0] != "TOTAL":
+            if len(values) >= 3 and values[0] != "TOTAL":
                 library_path = values[0]
-                library_list.append(library_path)
+                size_mb_str = values[1]  # Lấy size MB từ cột thứ 3
+                # Làm tròn size MB
+                try:
+                    size_mb = round(float(size_mb_str))
+                    formatted_line = f"{size_mb} {library_path}"
+                except (ValueError, TypeError):
+                    # Nếu không parse được size, chỉ hiển thị path
+                    formatted_line = library_path
+                library_list.append(formatted_line)
         
         if not library_list:
             messagebox.showwarning(
@@ -488,8 +497,8 @@ class ParseTab:
             
             if success:
                 self.selected_device = selected
-                self.connection_status.set(f"Connected: {selected}")
-                self.connection_status.config(foreground="green")
+                self.connection_status_var.set(f"Connected: {selected}")
+                self.connection_status_label.config(foreground="green")
                 self.calculate_button.configure(state="normal")
                 self.log_callback(f"[ADB] Successfully connected to {selected}")
             else:
@@ -571,24 +580,26 @@ class ParseTab:
         # Add individual libraries
         for library, size_bytes in results.items():
             size_kb = size_bytes / 1024
+            size_mb = size_kb / 1024
             self.results_tree.insert(
                 "", "end",
-                values=(library, f"{size_kb:.1f}", f"{size_bytes:,}")
+                values=(library, f"{size_kb:.1f}", f"{size_mb:.2f}")
             )
             total_size += size_bytes
 
         # Add total row
         if results:
             total_kb = total_size / 1024
+            total_mb = total_kb / 1024
             total_item = self.results_tree.insert(
                 "", "end",
-                values=("TOTAL", f"{total_kb:.1f}", f"{total_size:,}"),
+                values=("TOTAL", f"{total_kb:.1f}", f"{total_mb:.2f}"),
                 tags=("total",)
             )
             # Configure total row style
             self.results_tree.tag_configure("total", background="#e6f3ff", font=("TkDefaultFont", 9, "bold"))
 
-        self.log_callback(f"[CALC] Calculation completed. Total size: {total_kb:.1f} KB ({total_size:,} bytes)")
+        self.log_callback(f"[CALC] Calculation completed. Total size: {total_kb:.1f} KB ({total_mb:.2f} MB)")
 
     def on_delete_library(self):
         """Delete selected library from results"""
@@ -631,7 +642,8 @@ class ParseTab:
             values = self.results_tree.item(item, "values")
             if len(values) >= 3 and values[0] != "TOTAL":
                 try:
-                    size_bytes = int(values[2].replace(",", ""))
+                    size_kb = float(values[1])
+                    size_bytes = size_kb * 1024
                     total_size += size_bytes
                 except (ValueError, IndexError):
                     pass
@@ -639,9 +651,10 @@ class ParseTab:
         # Add new total row
         if total_size > 0:
             total_kb = total_size / 1024
+            total_mb = total_kb / 1024
             self.results_tree.insert(
                 "", "end",
-                values=("TOTAL", f"{total_kb:.1f}", f"{total_size:,}"),
+                values=("TOTAL", f"{total_kb:.1f}", f"{total_mb:.2f}"),
                 tags=("total",)
             )
             self.results_tree.tag_configure("total", background="#e6f3ff", font=("TkDefaultFont", 9, "bold"))

@@ -35,7 +35,7 @@ class TuningTab:
         """Create content for tuning mode with REL path and enhanced comparison"""
         # Input fields frame
         input_frame = ttk.LabelFrame(
-            self.frame, text="Configuration", padding=10
+            self.frame, text="Enter the device_common.mk file path", padding=10
         )
         input_frame.pack(fill="x", pady=(0, 10))
 
@@ -709,19 +709,23 @@ class TuningTab:
                 f"Are you sure you want to delete property '{values[1]}'?\n\n"
                 f"This property will be removed from ALL files when you apply changes.",
             ):
+                # Get parent item ID before deleting the current item
+                parent = self.properties_tree.parent(item)
+                
                 self.properties_tree.delete(item)
                 self.log_callback(
                     f"[INFO] Deleted property {values[0]}.{values[1]}. Apply changes to update all files."
                 )
 
                 # Check if parent category is now empty and remove if so
-                parent = self.properties_tree.parent(item)
                 if parent:
                     remaining_children = self.properties_tree.get_children(parent)
                     if not remaining_children:
+                        # Get the category name from the parent item's values before deleting it
+                        parent_category_name = self.properties_tree.item(parent, "values")[0]
                         self.properties_tree.delete(parent)
                         self.log_callback(
-                            f"[INFO] Removed empty {values[0]} category."
+                            f"[INFO] Removed empty {parent_category_name} category."
                         )
                 return
 

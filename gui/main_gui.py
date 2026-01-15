@@ -1,26 +1,28 @@
 """
 Main window implementation for the Tuning Tool
 Handles the main application window, navigation tabs, and mode switching
-Updated to support enhanced 3-path tuning functionality, System bringup, and Readahead mode
+Updated to support enhanced 3-path tuning functionality, System bringup, Readahead mode, and LoadApkAsset mode
 """
 
 import tkinter as tk
-from tkinter import ttk
-from config.p4_config import initialize_p4_config
+from tkinter import ttk, messagebox
+from config.p4_config import initialize_p4_config, check_p4_login_status, p4_login
 from gui.bringup_tab import BringupTab
 from gui.tuning_tab import TuningTab
 from gui.parse_tab import ParseTab
 from gui.readahead_tab import ReadaheadTab
+from gui.loadapkasset_tab import LoadApkAssetTab
 from gui.gui_utils import GUIUtils
+from gui.login_dialog import show_login_dialog
 
 
 class BringupToolGUI:
-    """Main GUI class for the Tuning Tool with Parse Mode, Enhanced Tuning, and Readahead"""
+    """Main GUI class for the Tuning Tool with Parse Mode, Enhanced Tuning, Readahead, and LoadApkAsset"""
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("P4 tool")
-        self.root.geometry("1200x900")  # Increased size for Readahead mode
+        self.root.geometry("1200x900")  # Increased size for additional modes
         self.root.minsize(800, 900)
 
         # Current mode
@@ -28,6 +30,12 @@ class BringupToolGUI:
 
         # Initialize P4 configuration silently
         initialize_p4_config()
+
+        # Check P4 login status and handle authentication
+        if not self.handle_p4_authentication():
+            # If authentication failed or user cancelled, exit
+            self.root.destroy()
+            return
 
         # Initialize GUI utilities
         self.gui_utils = GUIUtils(self.root)
@@ -37,6 +45,7 @@ class BringupToolGUI:
         self.tuning_tab = None
         self.parse_tab = None
         self.readahead_tab = None
+        self.loadapkasset_tab = None
 
         # Create GUI components
         self.create_navbar()
@@ -61,12 +70,14 @@ class BringupToolGUI:
         self.tuning_tab_frame = ttk.Frame(self.notebook)
         self.parse_tab_frame = ttk.Frame(self.notebook)
         self.readahead_tab_frame = ttk.Frame(self.notebook)
+        self.loadapkasset_tab_frame = ttk.Frame(self.notebook)
 
         # Add tabs to notebook
         self.notebook.add(self.bringup_tab_frame, text="Bring up")
         self.notebook.add(self.tuning_tab_frame, text="Tuning value")
         self.notebook.add(self.parse_tab_frame, text="Parse")
         self.notebook.add(self.readahead_tab_frame, text="Readahead")
+        self.notebook.add(self.loadapkasset_tab_frame, text="LoadApkAsset")
 
         # Bind tab change event
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
@@ -82,6 +93,7 @@ class BringupToolGUI:
         self.tuning_tab = TuningTab(self.main_frame, self.gui_utils)
         self.parse_tab = ParseTab(self.main_frame, self.gui_utils)
         self.readahead_tab = ReadaheadTab(self.main_frame, self.gui_utils)
+        self.loadapkasset_tab = LoadApkAssetTab(self.main_frame, self.gui_utils)
 
     def create_status_bar(self):
         """Create status bar"""
@@ -115,6 +127,8 @@ class BringupToolGUI:
             self.switch_mode("parse")
         elif tab_text == "Readahead":
             self.switch_mode("readahead")
+        elif tab_text == "LoadApkAsset":
+            self.switch_mode("loadapkasset")
 
     def switch_mode(self, mode):
         """Switch between different modes"""
@@ -142,7 +156,12 @@ class BringupToolGUI:
         elif mode == "readahead":
             self.readahead_tab.show()
             self.status_var.set(
-                "Mode: Readahead - Configure workspaces and libraries for rscmgr.rc modification"
+                "Mode: Readahead - Configure REL/FLUMEN/BENI workspaces and libraries for rscmgr.rc modification"
+            )
+        elif mode == "loadapkasset":
+            self.loadapkasset_tab.show()
+            self.status_var.set(
+                "Mode: LoadApkAsset - Add asset apps to chipsets in ReadaheadManager.java"
             )
 
     def on_clear(self):
@@ -155,6 +174,32 @@ class BringupToolGUI:
             self.parse_tab.clear_all()
         elif self.current_mode.get() == "readahead":
             self.readahead_tab.clear_all()
+        elif self.current_mode.get() == "loadapkasset":
+            self.loadapkasset_tab.clear_all()
+
+    def handle_p4_authentication(self):
+        """Handle P4 authentication with infinite retry logic"""
+        # Check if already logged in
+        if check_p4_login_status():
+            return True
+            
+        # Infinite retry loop for login
+        while True:
+            # Show login dialog
+            password, cancelled = show_login_dialog(self.root)
+            
+            # If user cancelled, exit application
+            if cancelled:
+                messagebox.showinfo("Application Exit", "P4 authentication is required to use this application.")
+                return False
+            
+            # Try to login with provided password
+            if p4_login(password):
+                # Login successful
+                return True
+            else:
+                # Login failed, show error and continue loop
+                messagebox.showerror("Login Failed", "Authentication failed. Please check your password and try again.")
 
     def run(self):
         """Start the GUI main loop"""

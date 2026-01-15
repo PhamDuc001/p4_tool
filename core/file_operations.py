@@ -6,8 +6,65 @@ import os
 import shutil
 from datetime import datetime
 
+def find_block_boundaries_improved(lines, start_header):
+    """Find start and end indices of a block - IMPROVED with case-insensitive"""
+    start = end = None
+    
+    # Find start header (case-insensitive)
+    for idx, line in enumerate(lines):
+        if line.strip().lower() == start_header.lower():
+            start = idx
+            break
+    
+    if start is None:
+        return None, None
+    
+    # Find end boundary (empty line or comment line)
+    for idx in range(start + 1, len(lines)):
+        line_stripped = lines[idx].strip()
+        
+        # End at empty line
+        if not line_stripped:
+            end = idx
+            break
+        
+        # End at any comment line
+        if line_stripped.startswith('#'):
+            end = idx
+            break
+    
+    if end is None:
+        end = len(lines)
+    
+    return start, end
+
+def extract_block_content(lines, start_header):
+    """Extract ONLY content within block (excluding header) - case-insensitive"""
+    start, end = find_block_boundaries_improved(lines, start_header)
+    
+    if start is None:
+        return []
+    
+    # Return content after header, before next boundary
+    return lines[start+1:end]
+
+def replace_block_content(target_lines, new_content_lines, start_header):
+    """Replace ONLY content within block, keep header and other blocks intact"""
+    start, end = find_block_boundaries_improved(target_lines, start_header)
+    
+    if start is None:
+        # Block not found, append at end
+        return target_lines + [start_header + "\n"] + new_content_lines
+    
+    # Build result: keep header, replace content, keep rest
+    result = target_lines[:start+1]  # Include header line
+    result.extend(new_content_lines)   # New content
+    result.extend(target_lines[end:])    # Rest of file (including next headers/blocks)
+    
+    return result
+
 def extract_block(lines, start_header, next_header_list):
-    """Extract block of lines between headers"""
+    """Extract block of lines between headers - LEGACY (kept for backward compatibility)"""
     start = end = None
     for idx, line in enumerate(lines):
         if line.strip() == start_header:
@@ -66,13 +123,13 @@ def replace_block(target_lines, block_lines, start_header, next_header_list):
 #     with open(target_path, "r", encoding="utf-8") as f:
 #         target_lines = f.readlines()
 
-#     lmkd_block = extract_block(vince_lines, "# LMKD property", ["# Chimera property", "# DHA property"])
+#     lmkd_block = extract_block(vince_lines, "# LMKD property", ["#", ""])
 #     if not lmkd_block:
-#         lmkd_block = extract_block(vince_lines, "# DHA property", ["# Chimera property"])
-#     chimera_block = extract_block(vince_lines, "# Chimera property", ["# Nandswap", "#", ""]) 
+#         lmkd_block = extract_block(vince_lines, "# DHA property", ["#", ""])
+#     chimera_block = extract_block(vince_lines, "# Chimera property", ["#", ""]) 
 
-#     updated_target = replace_block(target_lines, lmkd_block, "# LMKD property", ["# Chimera property", "# DHA property"])
-#     updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["# Nandswap", "#", ""]) 
+#     updated_target = replace_block(target_lines, lmkd_block, "# LMKD property", ["#", ""])
+#     updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["#", ""]) 
 
 #     # Write updated file without creating a backup
 #     with open(target_path, "w", encoding="utf-8") as f:
@@ -80,74 +137,68 @@ def replace_block(target_lines, block_lines, start_header, next_header_list):
 #     log_callback(f"[OK] Updated {target_name} file.")
 
 def update_lmkd_chimera(vince_path, target_path, log_callback):
-    """Update LMKD and Chimera properties in target file - Enhanced to add missing sections"""
+    """Update LMKD and Chimera properties in target file - COMPLETELY REWRITTEN"""
     target_name = "BENI" if "beni" in target_path.lower() else "FLUMEN" if "flumen" in target_path.lower() else "TARGET"
     log_callback(f"[STEP 3] Updating LMKD and Chimera properties in {target_name}...")
     
+    # Read files
     with open(vince_path, "r", encoding="utf-8") as f:
         vince_lines = f.readlines()
     with open(target_path, "r", encoding="utf-8") as f:
         target_lines = f.readlines()
 
-    # Extract blocks from VINCE
-    lmkd_block = extract_block(vince_lines, "# LMKD property", ["#", ""])
-    if not lmkd_block:
-        lmkd_block = extract_block(vince_lines, "# DHA property", ["#", ""])
-    chimera_block = extract_block(vince_lines, "# Chimera property", ["#", ""]) 
-
-    # Check what sections exist in target
-    has_lmkd = any("# LMKD property" in line for line in target_lines)
-    has_dha = any("# DHA property" in line for line in target_lines)
-    has_chimera = any("# Chimera property" in line for line in target_lines)
+    # Extract content from VINCE (not headers) - case-insensitive
+    lmkd_content = []
+    chimera_content = []
     
-    # Determine which LMKD/DHA header to use based on VINCE
-    lmkd_header = "# LMKD property" if any("# LMKD property" in line for line in vince_lines) else "# DHA property"
+    # Try LMKD first, then DHA
+    lmkd_content = extract_block_content(vince_lines, "# LMKD property")
+    if not lmkd_content:
+        lmkd_content = extract_block_content(vince_lines, "# DHA property")
+    
+    # Extract Chimera content
+    chimera_content = extract_block_content(vince_lines, "# Chimera property")
+    
+    # Check what exists in target - case-insensitive
+    has_lmkd = any(line.strip().lower() == "# lmkd property" for line in target_lines)
+    has_dha = any(line.strip().lower() == "# dha property" for line in target_lines)
+    has_chimera = any(line.strip().lower() == "# chimera property" for line in target_lines)
     
     updated_target = target_lines[:]
     
-    # Update existing sections
-    if has_lmkd or has_dha:
-        # Replace existing LMKD section
+    # Update LMKD/DHA block if exists in target and has content from VINCE
+    if lmkd_content:
         if has_lmkd:
-            updated_target = replace_block(updated_target, lmkd_block, "# LMKD property", ["#", ""])
+            updated_target = replace_block_content(updated_target, lmkd_content, "# LMKD property")
+            log_callback(f"[OK] Updated LMKD property block in {target_name}")
         elif has_dha:
-            updated_target = replace_block(updated_target, lmkd_block, "# DHA property", ["#", ""])
+            updated_target = replace_block_content(updated_target, lmkd_content, "# DHA property")
+            log_callback(f"[OK] Updated DHA property block in {target_name}")
+        else:
+            # Add LMKD block if target doesn't have it
+            lmkd_header = "# LMKD property" if any("# LMKD property" in line for line in vince_lines) else "# DHA property"
+            updated_target = replace_block_content(updated_target, lmkd_content, lmkd_header)
+            log_callback(f"[OK] Added LMKD property block to {target_name}")
+    else:
+        log_callback(f"[INFO] No LMKD content found in VINCE, skipping LMKD update")
     
-    if has_chimera:
-        # Replace existing Chimera section
-        updated_target = replace_block(updated_target, chimera_block, "# Chimera property", ["#", ""]) 
+    # Update Chimera block if exists in target and has content from VINCE
+    if chimera_content:
+        if has_chimera:
+            updated_target = replace_block_content(updated_target, chimera_content, "# Chimera property")
+            log_callback(f"[OK] Updated Chimera property block in {target_name}")
+        else:
+            # Add Chimera block if target doesn't have it
+            updated_target = replace_block_content(updated_target, chimera_content, "# Chimera property")
+            log_callback(f"[OK] Added Chimera property block to {target_name}")
+    else:
+        log_callback(f"[INFO] No Chimera content found in VINCE, skipping Chimera update")
     
-    # Add missing sections to end of file
-    sections_to_add = []
-    
-    # Check if we need to add LMKD/DHA section
-    if not has_lmkd and not has_dha and lmkd_block:
-        sections_to_add.append(lmkd_block)
-    
-    # Check if we need to add Chimera section  
-    if not has_chimera and chimera_block:
-        sections_to_add.append(chimera_block)
-    
-    # Add missing sections to end of file
-    if sections_to_add:
-        # Ensure file ends with newline before adding sections
-        if updated_target and not updated_target[-1].endswith('\n'):
-            updated_target[-1] = updated_target[-1] + '\n'
-        
-        # Add a blank line before first new section
-        updated_target.append('\n')
-        
-        # Add each missing section
-        for section_block in sections_to_add:
-            updated_target.extend(section_block)
-            # Add blank line after each section (except last)
-            if section_block != sections_to_add[-1]:
-                updated_target.append('\n')
-
-    # Write updated file without creating a backup
+    # Write updated file
     with open(target_path, "w", encoding="utf-8") as f:
         f.writelines(updated_target)
-    log_callback(f"[OK] Updated {target_name} file.")
+    
+    log_callback(f"[OK] Updated {target_name} file successfully.")
 
 def create_backup(file_path):
     """Create backup of file with timestamp"""
@@ -164,16 +215,16 @@ def extract_properties_from_file(file_path):
         properties = {"LMKD": {}, "Chimera": {}}
         
         # Extract LMKD properties
-        lmkd_block = extract_block(lines, "# LMKD property", ["# Chimera property", "# DHA property"])
+        lmkd_block = extract_block(lines, "# LMKD property", ["#", ""])
         if not lmkd_block:
-            lmkd_block = extract_block(lines, "# DHA property", ["# Chimera property"])
+            lmkd_block = extract_block(lines, "# DHA property", ["#", ""])
         
         if lmkd_block:
             lmkd_props = parse_properties_block(lmkd_block)
             properties["LMKD"] = lmkd_props
         
         # Extract Chimera properties
-        chimera_block = extract_block(lines, "# Chimera property", ["# Nandswap", "#", ""])
+        chimera_block = extract_block(lines, "# Chimera property", ["#", ""])
         if chimera_block:
             chimera_props = parse_properties_block(chimera_block)
             properties["Chimera"] = chimera_props

@@ -1,19 +1,30 @@
 """
-Bringup process implementation - REFACTORED VERSION
+Bringup process implementation
 Main logic for the bringup workflow
-Enhanced with centralized utilities and reduced code duplication
+Enhanced to support mixed input (depot paths and workspaces)
+Updated logic: Compare properties first, then create changelist only when needed
 """
 from core.p4_operations import (
-    validate_depot_path, create_changelist, 
-    sync_file, checkout_file, resolve_workspace_to_device_common_path, 
-    is_workspace_like, sync_file_silent
+    validate_depot_path,
+    map_client_two_paths, checkout_file_silent,
+    is_workspace_like, sync_file_silent, create_changelist_silent,
+    find_device_common_mk_path
 )
 from core.file_operations import (
     validate_properties_exist, update_lmkd_chimera,
     compare_properties_between_files
 )
-from core.core_utils import get_client_mapper
 from config.p4_config import depot_to_local_path
+
+def map_client_four_paths(beni_depot, vince_depot, flumen_depot, rel_depot, log_callback):
+    """Map four depots to client spec - WRAPPER for backward compatibility"""
+    from core.p4_operations import _map_client_depots_core
+    _map_client_depots_core([beni_depot, vince_depot, flumen_depot, rel_depot], log_callback)
+
+def map_client_three_paths(depot1, vince_depot, depot2, log_callback):
+    """Map three depots to client spec - WRAPPER for backward compatibility"""
+    from core.p4_operations import _map_client_depots_core
+    _map_client_depots_core([depot1, vince_depot, depot2], log_callback)
 
 def resolve_vendor_input_to_depot_path(user_input, log_callback=None):
     """
@@ -43,7 +54,7 @@ def resolve_vendor_input_to_depot_path(user_input, log_callback=None):
             log_callback(f"[VENDOR] Detected workspace: {user_input}")
         
         try:
-            resolved_path = resolve_workspace_to_device_common_path(user_input)
+            resolved_path, _ = find_device_common_mk_path(user_input)
             if log_callback:
                 log_callback(f"[OK] Resolved workspace to device_common.mk: {resolved_path}")
             return resolved_path
@@ -84,7 +95,7 @@ def compare_target_with_vince(vince_local_path, target_local_path, target_name, 
 
 def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
                        log_callback, progress_callback=None, error_callback=None):
-    """Execute the complete bringup process - Enhanced with refactored utilities"""
+    """Execute the complete bringup process - Enhanced with new logic: compare first, then create changelist"""
     try:
         # ============================================================================
         # STEP 1: VALIDATE INPUTS
@@ -163,14 +174,20 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
             progress_callback(10)
         
         # ============================================================================
-        # STEP 2: MAP ALL VALID PATHS - Using refactored mapper
+        # STEP 2: MAP ALL VALID PATHS
         # ============================================================================
         target_depot_paths = [target[1] for target in valid_targets]
         all_depot_paths = [vince_depot_path] + target_depot_paths
         
-        # Use centralized client mapper
-        mapper = get_client_mapper()
-        mapper.map_depots(all_depot_paths, log_callback)
+        # Choose appropriate mapping function based on number of paths
+        if len(all_depot_paths) == 4:  # VINCE + 3 targets
+            map_client_four_paths(target_depot_paths[0], vince_depot_path, 
+                                target_depot_paths[1], target_depot_paths[2], log_callback)
+        elif len(all_depot_paths) == 3:  # VINCE + 2 targets
+            map_client_three_paths(target_depot_paths[0], vince_depot_path, 
+                                 target_depot_paths[1], log_callback)
+        elif len(all_depot_paths) == 2:  # VINCE + 1 target
+            map_client_two_paths(target_depot_paths[0], vince_depot_path, log_callback)
         
         if progress_callback: 
             progress_callback(25)
@@ -269,7 +286,7 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
         log_callback(f"[STEP 7] Found {len(files_need_update)} files that need updates: {', '.join([f[0] for f in files_need_update])}")
         
         # Create single changelist for all updates
-        changelist_id = create_changelist(log_callback)
+        changelist_id = create_changelist_silent("Create Changelist for Bringup Process")
         
         if progress_callback: 
             progress_callback(80)
@@ -278,7 +295,7 @@ def run_bringup_process(beni_input, vince_input, flumen_input, rel_input,
         for target_name, target_depot, target_local in files_need_update:
             try:
                 # Checkout file
-                checkout_file(target_depot, changelist_id, log_callback)
+                checkout_file_silent(target_depot, changelist_id, log_callback)
                 
                 # Update properties
                 update_lmkd_chimera(vince_local, target_local, log_callback)
