@@ -4,10 +4,10 @@ Handles workspace parsing to find device_common.mk files and library size calcul
 """
 
 import re
-import subprocess
+import subprocess, os
 from P4 import P4, P4Exception
 from core.p4_operations import find_device_common_mk_path
-
+from adb_wrapper import run_adb_command  # Thêm import này
 
 # ============================================================================
 # WORKSPACE PARSING LOGIC
@@ -66,12 +66,19 @@ def refresh_adb_devices(log_callback=None):
     try:
         if log_callback:
             log_callback("[ADB] Running adb devices command...")
-            
+        
+        # Thiết lập cờ để ẩn cửa sổ console con khi chạy trên Windows
+        creation_flags = 0
+        if os.name == 'nt':
+            creation_flags = subprocess.CREATE_NO_WINDOW
+
         result = subprocess.run(
             ["adb", "devices"], 
             capture_output=True, 
             text=True, 
-            timeout=10
+            timeout=10,
+            stdin=subprocess.DEVNULL,       # <--- QUAN TRỌNG: Ngắt đầu vào để tránh treo
+            creationflags=creation_flags    # <--- QUAN TRỌNG: Đảm bảo chạy ngầm trên Windows
         )
         
         if result.returncode != 0:
@@ -124,12 +131,19 @@ def connect_to_device(device_id, log_callback=None):
         if log_callback:
             log_callback(f"[ADB] Testing connection to device: {device_id}")
         
+        # Thiết lập cờ để ẩn cửa sổ console con khi chạy trên Windows
+        creation_flags = 0
+        if os.name == 'nt':
+            creation_flags = subprocess.CREATE_NO_WINDOW
+
         # Test connection by running a simple command
         result = subprocess.run(
             ["adb", "-s", device_id, "shell", "echo", "test"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=15,
+            stdin=subprocess.DEVNULL,       # <--- QUAN TRỌNG: Ngắt đầu vào để tránh treo
+            creationflags=creation_flags    # <--- QUAN TRỌNG: Đảm bảo chạy ngầm trên Windows
         )
 
         if result.returncode == 0:
@@ -138,12 +152,13 @@ def connect_to_device(device_id, log_callback=None):
             return True
         else:
             if log_callback:
-                log_callback(f"[ERROR] Connection test failed for {device_id}: {result.stderr}")
+                # Log cả stdout và stderr để debug kỹ hơn
+                log_callback(f"[ERROR] Connection test failed for {device_id}. Out: {result.stdout}. Err: {result.stderr}")
             return False
 
     except subprocess.TimeoutExpired:
         if log_callback:
-            log_callback(f"[ERROR] Connection test timed out for {device_id}")
+            log_callback(f"[ERROR] Connection test timed out for {device_id}. ADB process hung.")
         return False
     except Exception as e:
         if log_callback:
@@ -171,12 +186,19 @@ def calculate_library_sizes(device_id, libraries, log_callback=None, progress_ca
             if log_callback:
                 log_callback(f"[CALC] Checking size of: {library}")
             
+            # Thiết lập cờ để ẩn cửa sổ console con khi chạy trên Windows
+            creation_flags = 0
+            if os.name == 'nt':
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
             # Run du command on device
             result = subprocess.run(
                 ["adb", "-s", device_id, "shell", "du", library],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
+                stdin=subprocess.DEVNULL,       # <--- QUAN TRỌNG: Ngắt đầu vào để tránh treo
+                creationflags=creation_flags    # <--- QUAN TRỌNG: Đảm bảo chạy ngầm trên Windows
             )
 
             if result.returncode == 0:
