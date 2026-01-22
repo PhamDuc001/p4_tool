@@ -1,10 +1,9 @@
 """
-Enhanced System process implementation
-Handles the system bringup workflow for workspace-based operations with improved rscmgr handling
+Readahead process implementation
+Handles the readahead workflow for workspace-based operations with library processing
 Enhanced to support mixed input (depot paths and workspaces)
 Enhanced Samsung vendor path filtering with priority-based logic
-FIXED: Now processes ALL auto-resolved targets, not just originally provided ones
-NEW: Added Android.mk processing support with module definition management
+NEW: Added library processing support for Resource=1 and Resource=2
 """
 
 import os
@@ -17,17 +16,21 @@ from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
     map_single_depot, sync_file_silent, checkout_file_silent,
     validate_device_common_mk_path, validate_depot_path,
-    is_workspace_like, auto_resolve_missing_branches, find_device_common_mk_path
+    is_workspace_like, auto_resolve_missing_branches, find_device_common_mk_path,
+    get_integration_source_depot_path
 )
 from processes.system_process import (
-    get_rscmgr_reference_from_device_common,
+    get_rscmgr_reference_from_device_common as find_rscmgr_filename_from_device_common,
     find_samsung_vendor_path_from_workspace,
     add_rscmgr_reference_to_device_common,
     find_android_mk_from_samsung_path,
     check_rscmgr_in_android_mk,
     add_rscmgr_module_to_android_mk,
     construct_rscmgr_file_path,
-    update_device_common_mk_rscmgr_reference
+    update_device_common_mk_rscmgr_reference,
+    read_rscmgr_content,
+    write_rscmgr_content,
+    create_rscmgr_file
 )
 from config.p4_config import depot_to_local_path
 
@@ -213,12 +216,22 @@ def create_rscmgr_file(samsung_path, rscmgr_filename, vince_rscmgr_path, changel
         # Create new file path
         local_new_file_path = os.path.join(local_folder_path, rscmgr_filename)
         
-        # Read VINCE content
-        vince_local = depot_to_local_path(vince_rscmgr_path)
-        with open(vince_local, 'r', encoding='utf-8') as f:
-            vince_content = f.read()
+        # Read VINCE content if provided, otherwise create empty file
+        if vince_rscmgr_path:
+            vince_local = depot_to_local_path(vince_rscmgr_path)
+            with open(vince_local, 'r', encoding='utf-8') as f:
+                vince_content = f.read()
+        else:
+            # Create basic rscmgr content with clean structure - NO setprop initially
+            vince_content = """# rscmgr rc file
+service rscmgr /system/bin/rscmgr
+    class core
+    user system
+    group system readahead
+
+"""
         
-        # Create new file with VINCE content
+        # Create new file with content
         with open(local_new_file_path, 'w', encoding='utf-8') as f:
             f.write(vince_content)
         
@@ -322,7 +335,7 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
             log_callback(f"[{category}] Processing device_common.mk...")
         
         # Check existing rscmgr reference in device_common.mk
-        existing_rscmgr = get_rscmgr_reference_from_device_common(device_common_path, log_callback)
+        existing_rscmgr = find_rscmgr_filename_from_device_common(device_common_path, log_callback)
         
         device_common_needs_update = False
         
@@ -466,188 +479,450 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
         return current_changelist_id
 
 
-def run_readahead_process(beni_input, vince_input, flumen_input, rel_input,
-                      log_callback, progress_callback=None, error_callback=None):
+def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist_id,
+                         log_callback, progress_callback=None, error_callback=None):
     """
-    ENHANCED: Execute system bringup process that processes ALL auto-resolved targets
-    Now includes Android.mk processing with module definition management
+    Execute readahead process with full integration history support
+    Cascades across REL → FLUMEN → BENI automatically
     """
     try:
-        # ============================================================================
-        # STEP 1: VALIDATE AND AUTO-RESOLVE INPUTS
-        # ============================================================================
-        log_callback("[SYSTEM] Starting enhanced system bringup process with auto-resolve support...")
-        log_callback("[SYSTEM] Will process: device_common.mk, Android.mk, rscmgr.rc")
-        
-        # Validate mandatory VINCE input
-        if not vince_input:
-            error_msg = "VINCE is mandatory for system bringup"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("Missing VINCE", error_msg)
-            return
+        if log_callback:
+            log_callback("[READAHEAD] Starting readahead process with integration cascading...")
 
-        log_callback("[VALIDATION] Validating VINCE input...")
-        try:
-            vince_device_common_path = resolve_input_to_device_common_path(vince_input, log_callback)
-        except Exception as e:
-            error_msg = f"VINCE input validation failed: {str(e)}"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("VINCE Validation Failed", error_msg)
-            return
+        # ============================================================================
+        # STEP 0: DETERMINE PROCESSING ORDER
+        # ============================================================================
+        rel_ws = workspaces.get("REL", "").strip()
+        flumen_ws = workspaces.get("FLUMEN", "").strip()
+        beni_ws = workspaces.get("BENI", "").strip()
+
+        if log_callback:
+            log_callback("[VALIDATION] Checking provided workspaces...")
+            log_callback(f"[INPUT] REL: {rel_ws if rel_ws else '(not provided)'}")
+            log_callback(f"[INPUT] FLUMEN: {flumen_ws if flumen_ws else '(not provided)'}")
+            log_callback(f"[INPUT] BENI: {beni_ws if beni_ws else '(not provided)'}")
+
+        # Validate at least one workspace
+        if not rel_ws and not flumen_ws and not beni_ws:
+            raise RuntimeError("At least one workspace from REL, FLUMEN, or BENI is required")
+
+        # Determine cascade order
+        cascade_branches = []
+        if rel_ws:
+            cascade_branches = ["REL", "FLUMEN", "BENI"]
+        elif flumen_ws:
+            cascade_branches = ["FLUMEN", "BENI"]
+        elif beni_ws:
+            cascade_branches = ["BENI"]
+
+        if log_callback:
+            log_callback(f"[CASCADE] Processing order: {' → '.join(cascade_branches)}")
+
+        if progress_callback:
+            progress_callback(10)
+
+        # ============================================================================
+        # STEP 1: FIND RSCMGR FILENAME
+        # ============================================================================
+        primary_branch = cascade_branches[0]
+        primary_workspace = workspaces[primary_branch]
+
+        if log_callback:
+            log_callback(f"[PRIORITY] Using {primary_branch} to find rscmgr filename...")
+
+        device_common_path, _ = find_device_common_mk_path(primary_workspace, log_callback)
+        if not device_common_path:
+            raise RuntimeError(f"Cannot find device_common.mk in {primary_branch}")
+
+        map_single_depot(device_common_path)
+        sync_file_silent(device_common_path)
+
+        rscmgr_filename = find_rscmgr_filename_from_device_common(device_common_path, log_callback)
+
+        if not rscmgr_filename:
+            rscmgr_filename = prompt_for_rscmgr_filename(log_callback)
+            if not rscmgr_filename:
+                raise RuntimeError("rscmgr filename is required")
+
+        if log_callback:
+            log_callback(f"[OK] Using rscmgr filename: {rscmgr_filename}")
 
         if progress_callback:
             progress_callback(20)
 
         # ============================================================================
-        # STEP 2: AUTO-RESOLVE MISSING BRANCHES
+        # STEP 2: CREATE/GET SHARED CHANGELIST
         # ============================================================================
-        log_callback("\n[AUTO-RESOLVE] Attempting to auto-resolve missing branches...")
-        
-        try:
-            resolved_beni, resolved_flumen, resolved_rel, resolved_vince = auto_resolve_missing_branches(
-                vince_input, flumen_input, beni_input, rel_input, log_callback
-            )
-        except Exception as e:
-            error_msg = f"Auto-resolve failed: {str(e)}"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("Auto-resolve Failed", error_msg)
-            return
-
-        # Update final inputs with resolved values
-        final_beni_input = resolved_beni if resolved_beni else beni_input
-        final_vince_input = resolved_vince if resolved_vince else vince_input
-        final_flumen_input = resolved_flumen if resolved_flumen else flumen_input
-        final_rel_input = resolved_rel if resolved_rel else rel_input
-        
-        log_callback("[AUTO-RESOLVE] Final resolved inputs:")
-        log_callback(f"[FINAL] VINCE: {final_vince_input}")
-        log_callback(f"[FINAL] BENI: {final_beni_input if final_beni_input else '(not available)'}")
-        log_callback(f"[FINAL] FLUMEN: {final_flumen_input if final_flumen_input else '(not available)'}")
-        log_callback(f"[FINAL] REL: {final_rel_input if final_rel_input else '(not available)'}")
+        if changelist_id:
+            if log_callback:
+                log_callback(f"[CL] Using provided changelist: {changelist_id}")
+        else:
+            changelist_id = create_changelist_silent("Readahead - Update rscmgr files across branches")
+            if log_callback:
+                log_callback(f"[CL] Created new changelist: {changelist_id}")
 
         if progress_callback:
-            progress_callback(40)
+            progress_callback(30)
 
         # ============================================================================
-        # STEP 3: PROCESS VINCE INPUT (Master source)
+        # STEP 3: PROCESS BRANCHES WITH CASCADING
         # ============================================================================
-        log_callback("\n[SYSTEM] Processing VINCE input (master source)...")
-        
-        # Map and sync VINCE device_common.mk
-        map_single_depot(vince_device_common_path, log_callback)
-        sync_file_silent(vince_device_common_path)
-        
-        # Check readahead feature
-        vince_rscmgr_filename = get_rscmgr_reference_from_device_common(vince_device_common_path, log_callback)
-        if not vince_rscmgr_filename:
-            error_msg = "VINCE does not have readahead feature (rscmgr*.rc not found)"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("Feature Not Found", f"{error_msg}\nCannot proceed with system bringup.")
-            return
-        
-        # Find VINCE rscmgr file
-        vince_rscmgr_path = None
-        
-        # Try from workspace if input was workspace
-        if is_workspace_like(final_vince_input):
+        source_rscmgr_path = None
+        current_device_common_path = None
+        current_android_mk_path = None
+
+        progress_step = 70 / len(cascade_branches)
+        current_progress = 30
+
+        for idx, branch in enumerate(cascade_branches):
             try:
-                vince_samsung_path = find_samsung_vendor_path_from_workspace(final_vince_input, log_callback)
-                if vince_samsung_path:
-                    vince_rscmgr_path = construct_rscmgr_file_path(vince_samsung_path, vince_rscmgr_filename)
-                    if not validate_depot_path(vince_rscmgr_path):
-                        vince_rscmgr_path = None
+                # Determine if this is the first branch (for library editing)
+                is_first_branch = (idx == 0)
+
+                # Determine input for this branch
+                if idx == 0:
+                    # First branch - use workspace name
+                    branch_input = workspaces[branch]
+                else:
+                    # Cascaded branch - get paths from integration
+                    if log_callback:
+                        log_callback(f"\n[CASCADE] Finding {branch} paths from integration...")
+
+                    branch_paths = get_cascaded_paths_from_integration(
+                        current_device_common_path, current_android_mk_path,
+                        branch, log_callback
+                    )
+
+                    if not branch_paths:
+                        if log_callback:
+                            log_callback(f"[WARNING] Could not cascade to {branch}, skipping...")
+                        continue
+
+                    branch_input = branch_paths
+
+                # Process this branch
+                device_common_path, android_mk_path, rscmgr_path = process_single_branch(
+                    branch, branch_input, rscmgr_filename, resource1_libs, resource2_libs,
+                    changelist_id, source_rscmgr_path, is_first_branch, log_callback
+                )
+
+                # Save paths for next cascade
+                current_device_common_path = device_common_path
+                current_android_mk_path = android_mk_path
+                source_rscmgr_path = rscmgr_path
+
+                current_progress += progress_step
+                if progress_callback:
+                    progress_callback(int(current_progress))
+
             except Exception as e:
                 if log_callback:
-                    log_callback(f"[WARNING] Workspace-based rscmgr search failed: {str(e)}")
-        
-        if not vince_rscmgr_path:
-            error_msg = f"VINCE {vince_rscmgr_filename} not found in vendor/samsung paths"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("File Not Found", error_msg)
-            return
-        
-        # Map and sync VINCE rscmgr file
-        map_single_depot(vince_rscmgr_path, log_callback)
-        sync_file_silent(vince_rscmgr_path)
-        
-        log_callback(f"[OK] VINCE processing completed. Master rscmgr file: {vince_rscmgr_filename}")
+                    log_callback(f"[ERROR] Failed to process {branch}: {str(e)}")
 
-        if progress_callback:
-            progress_callback(60)
+                response = messagebox.askyesno(
+                    "Processing Error",
+                    f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
+                )
 
-        # ============================================================================
-        # STEP 4: PROCESS ALL RESOLVED TARGETS
-        # ============================================================================
-        log_callback("\n[SYSTEM] Building target list from ALL resolved values...")
-        
-        # BUILD COMPLETE TARGET LIST from ALL resolved values
-        all_resolved_targets = []
-        
-        # Add BENI (mandatory - must exist after auto-resolve or original input)
-        if final_beni_input:
-            all_resolved_targets.append(("BENI", final_beni_input))
-        else:
-            error_msg = "BENI is mandatory and could not be resolved"
-            log_callback(f"[ERROR] {error_msg}")
-            if error_callback:
-                error_callback("Missing BENI", error_msg)
-            return
-        
-        # Add FLUMEN if resolved or originally provided
-        if final_flumen_input:
-            all_resolved_targets.append(("FLUMEN", final_flumen_input))
-        
-        # Add REL if resolved or originally provided  
-        if final_rel_input:
-            all_resolved_targets.append(("REL", final_rel_input))
-        
-        log_callback(f"[TARGETS] Processing {len(all_resolved_targets)} resolved targets: {[cat for cat, _ in all_resolved_targets]}")
-        
-        # Process ALL resolved targets
-        shared_changelist_id = None
-        progress_step = 40 / len(all_resolved_targets) if all_resolved_targets else 0
-        current_progress = 60
-        
-        for category, target_input in all_resolved_targets:
-            log_callback(f"\n[SYSTEM] Processing {category} target (device_common.mk + Android.mk + rscmgr.rc)...")
-            shared_changelist_id = process_target_workspace_enhanced(
-                target_input, category, vince_rscmgr_filename, vince_rscmgr_path, 
-                shared_changelist_id, log_callback
-            )
-            
-            if progress_callback:
-                current_progress += progress_step
-                progress_callback(int(current_progress))
-        
+                if not response:
+                    raise
+
         if progress_callback:
             progress_callback(100)
-        
+
         # ============================================================================
-        # STEP 5: SUMMARY
+        # STEP 4: SUMMARY
         # ============================================================================
-        processed_targets = [cat for cat, _ in all_resolved_targets]
-        
-        log_callback(f"\n[SYSTEM] Enhanced system bringup process completed successfully!")
-        log_callback(f"[SUMMARY] Processed ALL resolved targets: {', '.join(processed_targets)}")
-        log_callback(f"[SUMMARY] Master rscmgr file: {vince_rscmgr_filename}")
-        log_callback(f"[SUMMARY] Files processed per target:")
-        log_callback(f"[SUMMARY]   1. device_common.mk - rscmgr reference updated")
-        log_callback(f"[SUMMARY]   2. Android.mk - rscmgr module definition ensured")
-        log_callback(f"[SUMMARY]   3. rscmgr.rc - content synchronized with VINCE")
-        
-        if shared_changelist_id:
-            log_callback(f"[SUMMARY] All modifications across {len(processed_targets)} targets are in shared changelist: {shared_changelist_id}")
-        else:
-            log_callback(f"[SUMMARY] No modifications were needed - all {len(processed_targets)} targets are already in sync")
-        
+        if log_callback:
+            log_callback("\n[READAHEAD] ========== PROCESS COMPLETED SUCCESSFULLY ==========")
+            log_callback(f"[SUMMARY] Rscmgr filename: {rscmgr_filename}")
+            log_callback(f"[SUMMARY] Resource=1 libraries: {len(resource1_libs)}")
+            log_callback(f"[SUMMARY] Resource=2 libraries: {len(resource2_libs)}")
+            log_callback(f"[SUMMARY] Changelist: {changelist_id}")
+            log_callback(f"[SUMMARY] Cascaded branches: {' → '.join(cascade_branches)}")
+
     except Exception as e:
-        log_callback(f"[ERROR] Enhanced system process failed: {str(e)}")
+        if log_callback:
+            log_callback(f"[ERROR] Readahead process failed: {str(e)}")
         if error_callback:
-            error_callback("System Process Error", str(e))
+            error_callback("Readahead Process Error", str(e))
         if progress_callback:
             progress_callback(0)
+        raise
+
+
+def get_cascaded_paths_from_integration(current_device_common_path, current_android_mk_path, branch, log_callback=None):
+    """Get paths for cascaded branch from integration history"""
+    try:
+        if log_callback:
+            log_callback(f"[CASCADE] Getting integration paths for {branch}...")
+        
+        integrated_device_common = get_integration_source_depot_path(current_device_common_path, log_callback)
+        integrated_android_mk = get_integration_source_depot_path(current_android_mk_path, log_callback)
+        
+        if not integrated_device_common or not integrated_android_mk:
+            if log_callback:
+                log_callback(f"[WARNING] No integration paths found for {branch}")
+            return None
+            
+        if log_callback:
+            log_callback(f"[OK] Found integration paths for {branch}")
+            log_callback(f"[INTEGRATION] device_common: {integrated_device_common}")
+            log_callback(f"[INTEGRATION] android_mk: {integrated_android_mk}")
+            
+        return {
+            'device_common_path': integrated_device_common,
+            'android_mk_path': integrated_android_mk
+        }
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to get cascaded paths for {branch}: {str(e)}")
+        return None
+
+
+def update_libraries_in_rscmgr(rscmgr_path, resource1_libs, resource2_libs, log_callback=None):
+    """Update library entries in rscmgr file with multi-resource support - preserve structure"""
+    try:
+        if not resource1_libs and not resource2_libs:
+            if log_callback:
+                log_callback("[INFO] No libraries to update")
+            return
+            
+        local_path = depot_to_local_path(rscmgr_path)
+        
+        with open(local_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Parse existing content and preserve ALL resources
+        lines = content.split('\n')
+        final_content = []
+        resource_sections = {}  # Store all resource sections
+        current_section = None
+        current_resource_num = None
+        highest_resource = 0
+        
+        # Parse existing content - preserve ALL resources and structure
+        for line in lines:
+            if line.strip().startswith('on property:sys.readahead.resource='):
+                # Extract resource number
+                import re
+                match = re.search(r'on property:sys\.readahead\.resource=(\d+)', line.strip())
+                if match:
+                    current_resource_num = int(match.group(1))
+                    current_section = current_resource_num
+                    resource_sections[current_resource_num] = []
+                    highest_resource = max(highest_resource, current_resource_num)
+                    final_content.append(line)
+                    if log_callback:
+                        log_callback(f"[PARSE] Found resource={current_resource_num}")
+                else:
+                    final_content.append(line)
+            elif line.strip().startswith('setprop sys.readahead.resource 0'):
+                # Skip setprop lines - will add clean single one later at highest resource
+                current_section = None
+                continue
+            elif current_section is not None and line.strip().startswith('readahead '):
+                # Add readahead line to current resource section
+                resource_sections[current_resource_num].append(line)
+            else:
+                if current_section is None:
+                    final_content.append(line)
+                else:
+                    # This is a readahead line or empty line within a section
+                    if line.strip() or not line.strip():  # Keep empty lines for structure
+                        if line.strip().startswith('readahead '):
+                            resource_sections[current_resource_num].append(line)
+                        else:
+                            # Empty line or other content - add to final content
+                            final_content.append(line)
+        
+        # Add new libraries to appropriate sections
+        updated_libs = 0
+        
+        # Process Resource=1 libraries
+        if 1 in resource_sections or resource1_libs:
+            if 1 not in resource_sections:
+                resource_sections[1] = []
+            
+            for lib in resource1_libs:
+                lib_entry = f"    readahead {lib} --fully"
+                # Check if library already exists
+                existing = any(lib_entry in line for line in resource_sections[1])
+                if not existing:
+                    resource_sections[1].append(lib_entry)
+                    updated_libs += 1
+                    if log_callback:
+                        log_callback(f"[LIBRARY] Added Resource=1 library: {lib}")
+        
+        # Process Resource=2 libraries  
+        if 2 in resource_sections or resource2_libs:
+            if 2 not in resource_sections:
+                resource_sections[2] = []
+            
+            for lib in resource2_libs:
+                lib_entry = f"    readahead {lib} --fully"
+                # Check if library already exists
+                existing = any(lib_entry in line for line in resource_sections[2])
+                if not existing:
+                    resource_sections[2].append(lib_entry)
+                    updated_libs += 1
+                    if log_callback:
+                        log_callback(f"[LIBRARY] Added Resource=2 library: {lib}")
+        
+        # Rebuild content preserving structure and adding libraries
+        rebuilt_content = []
+        i = 0
+        while i < len(final_content):
+            line = final_content[i]
+            
+            if line.strip().startswith('on property:sys.readahead.resource='):
+                # Extract resource number
+                import re
+                match = re.search(r'on property:sys\.readahead\.resource=(\d+)', line.strip())
+                if match:
+                    resource_num = int(match.group(1))
+                    rebuilt_content.append(line)
+                    
+                    # Add libraries for this resource if they exist
+                    if resource_num in resource_sections and resource_sections[resource_num]:
+                        for lib_line in resource_sections[resource_num]:
+                            rebuilt_content.append(lib_line)
+                    
+                    # Add setprop if this is the highest resource
+                    if resource_num == highest_resource:
+                        rebuilt_content.append('    setprop sys.readahead.resource 0')
+                        if log_callback:
+                            log_callback(f"[CLEAN] Setprop added at resource={resource_num} (highest resource)")
+                else:
+                    rebuilt_content.append(line)
+            else:
+                rebuilt_content.append(line)
+            i += 1
+        
+        # Write updated content
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(rebuilt_content))
+            
+        if log_callback:
+            log_callback(f"[OK] Updated {updated_libs} libraries in rscmgr file with multi-resource support")
+            if updated_libs > 0:
+                log_callback(f"[LIBRARIES] Resource=1: {len(resource1_libs)}, Resource=2: {len(resource2_libs)}")
+                log_callback(f"[STRUCTURE] Preserved all resources (1-{highest_resource}), setprop at resource={highest_resource}")
+            
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to update libraries: {str(e)}")
+        raise
+
+
+def process_single_branch(branch, branch_input, rscmgr_filename, resource1_libs, resource2_libs, 
+                        changelist_id, source_rscmgr_path, is_first_branch, log_callback=None):
+    """Process single branch with library support"""
+    try:
+        if log_callback:
+            log_callback(f"\n[{branch}] ========== Processing {branch} ==========")
+        
+        # Get paths for this branch
+        if isinstance(branch_input, str):
+            # First branch - process from workspace
+            if log_callback:
+                log_callback(f"[{branch}] Finding paths from workspace: {branch_input}")
+            
+            device_common_path, _ = find_device_common_mk_path(branch_input, log_callback)
+            if not device_common_path:
+                raise RuntimeError(f"Cannot find device_common.mk in {branch}")
+            
+            samsung_path = find_samsung_vendor_path_from_workspace(branch_input, log_callback)
+            if not samsung_path:
+                raise RuntimeError(f"Cannot find samsung vendor path in {branch}")
+            
+            android_mk_path = find_android_mk_from_samsung_path(samsung_path, log_callback)
+            if not android_mk_path:
+                raise RuntimeError(f"Cannot find Android.mk in {branch}")
+        else:
+            # Cascaded branch - use provided paths
+            if log_callback:
+                log_callback(f"[{branch}] Using integrated paths from previous branch")
+            
+            device_common_path = branch_input['device_common_path']
+            android_mk_path = branch_input['android_mk_path']
+            
+            if log_callback:
+                log_callback(f"[{branch}] device_common.mk: {device_common_path}")
+                log_callback(f"[{branch}] Android.mk: {android_mk_path}")
+        
+        # Map and sync files
+        map_single_depot(device_common_path, log_callback)
+        sync_file_silent(device_common_path)
+        
+        map_single_depot(android_mk_path, log_callback)
+        sync_file_silent(android_mk_path)
+        
+        # Process device_common.mk - add rscmgr reference if needed
+        existing_rscmgr = find_rscmgr_filename_from_device_common(device_common_path, log_callback)
+        if not existing_rscmgr:
+            if log_callback:
+                log_callback(f"[{branch}] Adding rscmgr reference to device_common.mk...")
+            
+            checkout_file_silent(device_common_path, changelist_id, log_callback)
+            add_rscmgr_reference_to_device_common(device_common_path, rscmgr_filename, log_callback)
+        elif existing_rscmgr != rscmgr_filename:
+            if log_callback:
+                log_callback(f"[{branch}] Updating rscmgr reference in device_common.mk: {existing_rscmgr} → {rscmgr_filename}")
+            
+            checkout_file_silent(device_common_path, changelist_id, log_callback)
+            update_device_common_mk_rscmgr_reference(device_common_path, existing_rscmgr, rscmgr_filename, log_callback)
+        
+        # Process Android.mk - ensure rscmgr module exists
+        module_exists = check_rscmgr_in_android_mk(android_mk_path, rscmgr_filename, log_callback)
+        if not module_exists:
+            if log_callback:
+                log_callback(f"[{branch}] Adding rscmgr module to Android.mk...")
+            
+            add_rscmgr_module_to_android_mk(android_mk_path, rscmgr_filename, changelist_id, log_callback)
+        
+        # Process rscmgr file
+        samsung_path_match = re.search(r'(.+/vendor/samsung/)', android_mk_path)
+        if not samsung_path_match:
+            raise RuntimeError(f"Cannot extract samsung path from Android.mk: {android_mk_path}")
+        
+        samsung_path = samsung_path_match.group(1)
+        rscmgr_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename)
+        
+        if validate_depot_path(rscmgr_path):
+            # File exists - map and sync
+            if log_callback:
+                log_callback(f"[{branch}] Found existing rscmgr file: {rscmgr_path}")
+            
+            map_single_depot(rscmgr_path, log_callback)
+            sync_file_silent(rscmgr_path)
+            
+            # Update libraries for ALL branches (not just first branch)
+            if resource1_libs or resource2_libs:
+                checkout_file_silent(rscmgr_path, changelist_id, log_callback)
+                update_libraries_in_rscmgr(rscmgr_path, resource1_libs, resource2_libs, log_callback)
+                if log_callback:
+                    log_callback(f"[{branch}] Updated libraries in rscmgr file")
+        else:
+            # File doesn't exist - create new
+            if log_callback:
+                log_callback(f"[{branch}] Creating new rscmgr file: {rscmgr_path}")
+            
+            # Create with empty content first, then update libraries if needed
+            create_rscmgr_file(samsung_path, rscmgr_filename, "", changelist_id, log_callback)
+            
+            # Update libraries for ALL branches (not just first branch)
+            if resource1_libs or resource2_libs:
+                update_libraries_in_rscmgr(rscmgr_path, resource1_libs, resource2_libs, log_callback)
+                if log_callback:
+                    log_callback(f"[{branch}] Updated libraries in rscmgr file")
+        
+        if log_callback:
+            log_callback(f"[{branch}] ========== {branch} Completed ==========")
+        
+        return device_common_path, android_mk_path, rscmgr_path
+        
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[ERROR] Failed to process {branch}: {str(e)}")
+        raise
