@@ -292,7 +292,7 @@ class ReadaheadTab:
     def _parse_rscmgr_paths_logic(self, workspaces):
         """Parse rscmgr paths logic - simple validation only"""
         from processes.readahead_process import (
-            get_rscmgr_reference_from_device_common,
+            find_rscmgr_filename_from_device_common,
             find_rscmgr_file_path,
             prompt_for_rscmgr_filename,
         )
@@ -340,7 +340,7 @@ class ReadaheadTab:
             sync_file_silent(device_common_path)
 
             # Find rscmgr filename
-            rscmgr_filename = get_rscmgr_reference_from_device_common(
+            rscmgr_filename = find_rscmgr_filename_from_device_common(
                 device_common_path, self.log_callback
             )
             
