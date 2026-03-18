@@ -35,26 +35,26 @@ class TuningTab:
         """Create content for tuning mode with REL path and enhanced comparison"""
         # Input fields frame
         input_frame = ttk.LabelFrame(
-            self.frame, text="Enter the device_common.mk file path", padding=10
+            self.frame, text="Enter workspace or device_common.mk depot path", padding=10
         )
         input_frame.pack(fill="x", pady=(0, 10))
 
         # BENI Path
-        ttk.Label(input_frame, text="BENI Depot Path:").grid(
+        ttk.Label(input_frame, text="BENI (Workspace or Depot Path):").grid(
             column=0, row=0, sticky="w", pady=2
         )
         self.beni_entry = ttk.Entry(input_frame, width=70)
         self.beni_entry.grid(column=1, row=0, padx=5, pady=2, sticky="ew")
 
         # FLUMEN Path
-        ttk.Label(input_frame, text="FLUMEN Depot Path:").grid(
+        ttk.Label(input_frame, text="FLUMEN (Workspace or Depot Path):").grid(
             column=0, row=1, sticky="w", pady=2
         )
         self.flumen_entry = ttk.Entry(input_frame, width=70)
         self.flumen_entry.grid(column=1, row=1, padx=5, pady=2, sticky="ew")
 
         # REL Path (NEW)
-        ttk.Label(input_frame, text="REL Depot Path:").grid(
+        ttk.Label(input_frame, text="REL (Workspace or Depot Path):").grid(
             column=0, row=2, sticky="w", pady=2
         )
         self.rel_entry = ttk.Entry(input_frame, width=70)
@@ -226,28 +226,24 @@ class TuningTab:
         )
 
     def on_load_properties(self):
-        """Handle load properties button click - Enhanced for 3 paths"""
-        beni_path = self.beni_entry.get().strip()
-        flumen_path = self.flumen_entry.get().strip()
-        rel_path = self.rel_entry.get().strip()  # NEW
+        """Handle load properties button click - Enhanced for 3 paths with workspace support"""
+        beni_input = self.beni_entry.get().strip()
+        flumen_input = self.flumen_entry.get().strip()
+        rel_input = self.rel_entry.get().strip()
 
-        # Validation - at least one path is required
-        has_beni = beni_path and beni_path.startswith("//")
-        has_flumen = flumen_path and flumen_path.startswith("//")
-        has_rel = rel_path and rel_path.startswith("//")  # NEW
+        # Validation - at least one valid input is required (workspace or depot path)
+        has_beni = beni_input and (beni_input.startswith("//") or beni_input.upper().startswith("TEMPLATE"))
+        has_flumen = flumen_input and (flumen_input.startswith("//") or flumen_input.upper().startswith("TEMPLATE"))
+        has_rel = rel_input and (rel_input.startswith("//") or rel_input.upper().startswith("TEMPLATE"))
 
         if not has_beni and not has_flumen and not has_rel:
             messagebox.showerror(
-                "No Paths",
-                "At least one depot path (BENI, FLUMEN, or REL) must be provided and start with //depot/...",
+                "No Valid Inputs",
+                "At least one valid input (workspace name starting with TEMPLATE_* or depot path starting with //depot/...) is required."
             )
             return
 
-        self._load_properties_enhanced(
-            beni_path if has_beni else "", 
-            flumen_path if has_flumen else "",
-            rel_path if has_rel else ""  # NEW
-        )
+        self._load_properties_enhanced(beni_input, flumen_input, rel_input)
 
     def _load_properties_enhanced(self, beni_path, flumen_path, rel_path):
         """Load properties from 3 paths and handle comparison"""

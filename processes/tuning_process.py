@@ -5,14 +5,71 @@ Updated with auto-resolve functionality
 """
 import re
 from core.p4_operations import (
-    validate_depot_path, map_single_depot, map_two_depots_silent, 
+    validate_depot_path, validate_device_common_mk_path, is_workspace_like,
+    map_single_depot, map_two_depots_silent, 
     sync_file_silent, create_changelist_silent, checkout_file_silent,
-    get_integration_source_depot_path
+    get_integration_source_depot_path, find_device_common_mk_path
 )
 from core.file_operations import (
     update_properties_in_file, create_backup, extract_properties_from_file
 )
 from config.p4_config import depot_to_local_path
+
+
+def resolve_tuning_input_to_depot_path(user_input, log_callback=None):
+    """
+    Resolve tuning input (depot path or workspace) to device_common.mk depot path
+    
+    Args:
+        user_input: Can be depot path (//depot/...) or workspace name (TEMPLATE_*)
+        log_callback: Optional callback for logging
+    
+    Returns:
+        str: Resolved depot path to device_common.mk file
+    
+    Raises:
+        RuntimeError: If input validation or resolution fails
+    """
+    if not user_input:
+        return ""
+    
+    user_input = user_input.strip()
+    
+    # Case 1: Depot path
+    if user_input.startswith("//"):
+        if log_callback:
+            log_callback(f"[TUNING] Detected depot path: {user_input}")
+        
+        # Validate path exists
+        if not validate_depot_path(user_input):
+            raise RuntimeError(f"Depot path does not exist: {user_input}")
+        
+        # Validate it's a device_common.mk file
+        exists, is_device_common = validate_device_common_mk_path(user_input)
+        if not exists:
+            raise RuntimeError(f"Depot path does not exist: {user_input}")
+        elif not is_device_common:
+            raise RuntimeError(f"Path must be a device_common.mk file: {user_input}")
+        
+        if log_callback:
+            log_callback(f"[OK] Valid depot path: {user_input}")
+        return user_input
+    
+    # Case 2: Workspace name
+    elif is_workspace_like(user_input):
+        if log_callback:
+            log_callback(f"[TUNING] Detected workspace: {user_input}")
+        
+        try:
+            resolved_path, _ = find_device_common_mk_path(user_input, log_callback)
+            if log_callback:
+                log_callback(f"[OK] Resolved workspace to device_common.mk: {resolved_path}")
+            return resolved_path
+        except Exception as e:
+            raise RuntimeError(f"Workspace resolution failed: {str(e)}")
+    
+    else:
+        raise RuntimeError(f"Input must be depot path (//depot/...) or workspace (TEMPLATE_*): {user_input}")
 
 def map_three_depots_silent(depot1, depot2, depot3):
     """Map three depots to client spec without logging"""
@@ -243,40 +300,52 @@ def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original
             error_callback("Apply Tuning Error", str(e))
         return False
 
-def load_properties_for_tuning_enhanced(beni_depot_path, flumen_depot_path, rel_depot_path,
+def load_properties_for_tuning_enhanced(beni_input, flumen_input, rel_input,
                                        progress_callback=None, error_callback=None, info_callback=None):
-    """Load and compare properties from BENI, FLUMEN, and REL files"""
+    """
+    Load and compare properties from BENI, FLUMEN, and REL files
+    ENHANCED: Now supports both depot paths and workspace names
+    """
     try:
-        # Validate paths first
+        # Validate and resolve inputs first
         paths_to_process = {}
         
-        if beni_depot_path and beni_depot_path.startswith("//"):
-            if validate_depot_path(beni_depot_path):
-                paths_to_process["BENI"] = beni_depot_path
-            else:
+        # Process BENI
+        if beni_input:
+            try:
+                resolved_beni = resolve_tuning_input_to_depot_path(beni_input, None)
+                if resolved_beni:
+                    paths_to_process["BENI"] = resolved_beni
+            except Exception as e:
                 if error_callback:
-                    error_callback("Path Not Found", f"BENI depot path does not exist: {beni_depot_path}")
+                    error_callback("BENI Input Error", str(e))
                 return None
         
-        if flumen_depot_path and flumen_depot_path.startswith("//"):
-            if validate_depot_path(flumen_depot_path):
-                paths_to_process["FLUMEN"] = flumen_depot_path
-            else:
+        # Process FLUMEN
+        if flumen_input:
+            try:
+                resolved_flumen = resolve_tuning_input_to_depot_path(flumen_input, None)
+                if resolved_flumen:
+                    paths_to_process["FLUMEN"] = resolved_flumen
+            except Exception as e:
                 if error_callback:
-                    error_callback("Path Not Found", f"FLUMEN depot path does not exist: {flumen_depot_path}")
+                    error_callback("FLUMEN Input Error", str(e))
                 return None
         
-        if rel_depot_path and rel_depot_path.startswith("//"):
-            if validate_depot_path(rel_depot_path):
-                paths_to_process["REL"] = rel_depot_path
-            else:
+        # Process REL
+        if rel_input:
+            try:
+                resolved_rel = resolve_tuning_input_to_depot_path(rel_input, None)
+                if resolved_rel:
+                    paths_to_process["REL"] = resolved_rel
+            except Exception as e:
                 if error_callback:
-                    error_callback("Path Not Found", f"REL depot path does not exist: {rel_depot_path}")
+                    error_callback("REL Input Error", str(e))
                 return None
         
         if not paths_to_process:
             if error_callback:
-                error_callback("No Valid Paths", "At least one valid depot path is required.")
+                error_callback("No Valid Inputs", "At least one valid input (workspace or depot path) is required.")
             return None
         
         if progress_callback:
