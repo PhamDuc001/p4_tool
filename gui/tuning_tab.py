@@ -460,6 +460,7 @@ class TuningTab:
                     self.log_callback,
                     self.progress_callback,
                     self.gui_utils.error_callback,
+                    self.original_properties  # Pass original properties for description generation
                 )
 
                 if success:

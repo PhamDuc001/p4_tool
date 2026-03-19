@@ -1,7 +1,7 @@
 """
 Enhanced Tuning process implementation with 3-path support (BENI, FLUMEN, REL)
 Handles property loading, comparison, and applying changes to all 3 paths
-Updated with auto-resolve functionality
+Updated with auto-resolve functionality and dynamic changelist descriptions
 """
 import re
 from core.p4_operations import (
@@ -14,6 +14,159 @@ from core.file_operations import (
     update_properties_in_file, create_backup, extract_properties_from_file
 )
 from config.p4_config import depot_to_local_path
+
+
+def generate_tuning_description(original_properties, current_properties):
+    """
+    Generate dynamic changelist description for Tuning mode based on changes
+    
+    Args:
+        original_properties: Properties before modification
+        current_properties: Properties after modification
+    
+    Returns:
+        str: Generated description for changelist
+    """
+    if not original_properties or not current_properties:
+        return "Tuning - Apply property changes"
+    
+    # Remove metadata if present
+    original_props = {k: v for k, v in original_properties.items() if k != "_metadata"}
+    current_props = {k: v for k, v in current_properties.items() if k != "_metadata"}
+    
+    # Analyze changes for each category
+    changes_by_category = {}
+    for category in ["LMKD", "Chimera"]:
+        changes_by_category[category] = analyze_property_changes(
+            original_props.get(category, {}),
+            current_props.get(category, {})
+        )
+    
+    # Build description from changes
+    description_parts = []
+    for category in ["LMKD", "Chimera"]:
+        part = build_category_description_part(category, changes_by_category[category])
+        if part:
+            description_parts.append(part)
+    
+    if not description_parts:
+        return "Tuning - No changes detected"
+    
+    # Join all parts with " & "
+    return " & ".join(description_parts)
+
+
+def analyze_property_changes(original_dict, current_dict):
+    """
+    Analyze property changes between original and current state
+    
+    Returns:
+        dict: Dict with keys 'add', 'modify', 'delete' containing lists of property names
+    """
+    changes = {
+        "add": [],
+        "modify": [],
+        "delete": []
+    }
+    
+    if not original_dict:
+        original_dict = {}
+    
+    if not current_dict:
+        current_dict = {}
+    
+    original_keys = set(original_dict.keys())
+    current_keys = set(current_dict.keys())
+    
+    # Added properties
+    added = current_keys - original_keys
+    if added:
+        changes["add"] = sorted(list(added))
+    
+    # Deleted properties
+    deleted = original_keys - current_keys
+    if deleted:
+        changes["delete"] = sorted(list(deleted))
+    
+    # Modified properties (in both, AND value changed)
+    modified = []
+    for key in original_keys & current_keys:
+        # Check if value actually changed
+        if original_dict[key] != current_dict[key]:
+            modified.append(key)
+    
+    if modified:
+        changes["modify"] = sorted(modified)
+    
+    return changes
+
+
+def build_category_description_part(category, changes):
+    """
+    Build description part for a single category
+    
+    Args:
+        category: Category name (LMKD or Chimera)
+        changes: Dict with 'add', 'modify', 'delete' lists
+    
+    Returns:
+        str: Description part for this category, or empty if no changes
+    """
+    add_list = changes.get("add", [])
+    modify_list = changes.get("modify", [])
+    delete_list = changes.get("delete", [])
+    
+    # If no changes in this category
+    if not any(changes.values()):
+        return ""
+    
+    add_count = len(add_list)
+    modify_count = len(modify_list)
+    delete_count = len(delete_list)
+    
+    # Count total operations
+    total_ops = add_count + modify_count + delete_count
+    
+    # Case 1: Only Add operations
+    if add_count > 0 and modify_count == 0 and delete_count == 0:
+        if add_count == 1:
+            return f"Add value {add_list[0]}"
+        else:
+            return f"Add {category} values"
+    
+    # Case 2: Only Delete operations
+    elif delete_count > 0 and add_count == 0 and modify_count == 0:
+        if delete_count == 1:
+            return f"Delete value {delete_list[0]}"
+        else:
+            return f"Delete {category} values"
+    
+    # Case 3: Only Modify operations
+    elif modify_count > 0 and add_count == 0 and delete_count == 0:
+        if modify_count == 1:
+            return f"Tunning value {modify_list[0]}"
+        else:
+            return f"Tuning {category}"
+    
+    # Case 4: Add + Modify
+    elif add_count > 0 and modify_count > 0 and delete_count == 0:
+        return f"Add & Tunning {category}"
+    
+    # Case 5: Modify + Delete
+    elif modify_count > 0 and delete_count > 0 and add_count == 0:
+        return f"Tunning & Delete {category}"
+    
+    # Case 6: Add + Delete
+    elif add_count > 0 and delete_count > 0 and modify_count == 0:
+        return f"Add & Delete {category}"
+    
+    # Case 7: All 3 operations
+    elif add_count > 0 and modify_count > 0 and delete_count > 0:
+        return f"Add/Tune/Delete {category}"
+    
+    # Fallback
+    else:
+        return f"Update {category}"
 
 
 def resolve_tuning_input_to_depot_path(user_input, log_callback=None):
@@ -187,7 +340,8 @@ def auto_resolve_missing_depot_paths(original_depot_paths, log_callback=None):
         return original_depot_paths
 
 def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original_depot_paths, 
-                                                   log_callback, progress_callback=None, error_callback=None):
+                                                   log_callback, progress_callback=None, error_callback=None,
+                                                   original_properties=None):
     """Apply property changes to all target files with auto-resolve for missing paths"""
     try:
         # Remove metadata if present
@@ -217,9 +371,15 @@ def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original
         if progress_callback:
             progress_callback(15)
         
+        # Generate dynamic changelist description based on changes
+        description = "Tuning - Apply property changes to all paths"
+        if original_properties:
+            description = generate_tuning_description(original_properties, current_properties)
+            log_callback(f"[DESCRIPTION] Generated changelist description: {description}")
+        
         # Create changelist for modifications
         log_callback("[STEP 1] Creating pending changelist for tuning changes...")
-        changelist_id = create_changelist_silent("Tuning - Apply property changes to all paths")
+        changelist_id = create_changelist_silent(description)
         log_callback(f"[OK] Created changelist {changelist_id}")
         
         if progress_callback:

@@ -4,6 +4,7 @@ Handles the readahead workflow for workspace-based operations with library proce
 Enhanced to support mixed input (depot paths and workspaces)
 Enhanced Samsung vendor path filtering with priority-based logic
 NEW: Added library processing support for Resource=1 and Resource=2
+NEW: Added dynamic changelist descriptions
 """
 
 import os
@@ -33,6 +34,21 @@ from processes.system_process import (
     create_rscmgr_file
 )
 from config.p4_config import depot_to_local_path
+
+
+def generate_readahead_description(resource1_libs, resource2_libs):
+    """
+    Generate static changelist description for Readahead mode
+    
+    Args:
+        resource1_libs: List of Resource=1 libraries (not used)
+        resource2_libs: List of Resource=2 libraries (not used)
+    
+    Returns:
+        str: Static description for changelist
+    """
+    # Static description regardless of library count
+    return "Readahead some library"
 
 
 def prompt_for_rscmgr_filename(log_callback=None):
@@ -551,13 +567,20 @@ def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist
             progress_callback(20)
 
         # ============================================================================
-        # STEP 2: CREATE/GET SHARED CHANGELIST
+        # STEP 2: GENERATE DYNAMIC CHANGELIST DESCRIPTION
+        # ============================================================================
+        description = generate_readahead_description(resource1_libs, resource2_libs)
+        if log_callback:
+            log_callback(f"[DESCRIPTION] Generated changelist description: {description}")
+
+        # ============================================================================
+        # STEP 3: CREATE/GET SHARED CHANGELIST
         # ============================================================================
         if changelist_id:
             if log_callback:
                 log_callback(f"[CL] Using provided changelist: {changelist_id}")
         else:
-            changelist_id = create_changelist_silent("Readahead - Update rscmgr files across branches")
+            changelist_id = create_changelist_silent(description)
             if log_callback:
                 log_callback(f"[CL] Created new changelist: {changelist_id}")
 

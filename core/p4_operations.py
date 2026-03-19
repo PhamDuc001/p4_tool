@@ -130,9 +130,21 @@ def validate_device_common_mk_path(depot_path):
 
 
 def create_changelist_silent(description="Auto changelist"):
-    """Create pending changelist without logging"""
+    """Create pending changelist with template + dynamic description appended to [Title]"""
     changelist_spec = run_cmd("p4 change -o")
-    new_spec = re.sub(r"<enter description here>", description, changelist_spec)
+    # Parse changelist spec và append description sau [Title]
+    lines = changelist_spec.split('\n')
+    new_lines = []
+    
+    for line in lines:
+        # Tìm [Title] và append description
+        if line.strip() == "[Title]":
+            new_lines.append(f"\t[Title] {description}")
+        else:
+            # Giữ nguyên tất cả các line khác
+            new_lines.append(line)
+    
+    new_spec = '\n'.join(new_lines)
     changelist_result = run_cmd("p4 change -i", input_text=new_spec)
     changelist_id = re.search(r"Change (\d+)", changelist_result).group(1)
     return changelist_id

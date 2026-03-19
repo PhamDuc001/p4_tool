@@ -2,6 +2,7 @@
 LoadApkAsset process implementation
 Handles adding asset apps to chipsets in ReadaheadManager.java
 Processes across REL → FLUMEN → BENI with automatic integration
+Enhanced with dynamic changelist descriptions
 """
 
 import os
@@ -37,6 +38,25 @@ AVAILABLE_ASSETS = [
     "ASSET_SETTINGS",
     "ASSET_VOICENOTE"
 ]
+
+
+def generate_loadapkasset_description(selected_assets):
+    """
+    Generate dynamic changelist description for LoadApkAsset mode based on assets
+    
+    Args:
+        selected_assets: List of selected asset app names
+    
+    Returns:
+        str: Generated description for changelist
+    """
+    # If no assets, return default description
+    if not selected_assets or len(selected_assets) == 0:
+        return "LoadApkAsset - Add asset apps to chipsets"
+    
+    # List all assets with "for" preposition
+    assets_str = ', '.join(selected_assets)
+    return f"LoadApkAsset for {assets_str}"
 
 
 def find_samsung_vendor_path(workspace_name, log_callback=None):
@@ -364,12 +384,17 @@ def run_loadapkasset_process(workspaces, chipset_name, selected_assets, changeli
         if progress_callback:
             progress_callback(10)
         
+        # Generate dynamic changelist description based on selected assets
+        description = generate_loadapkasset_description(selected_assets)
+        if log_callback:
+            log_callback(f"[DESCRIPTION] Generated changelist description: {description}")
+
         # Create/get changelist
         if changelist_id:
             if log_callback:
                 log_callback(f"[CL] Using provided changelist: {changelist_id}")
         else:
-            changelist_id = create_changelist_silent("LoadApkAsset - Add asset apps to chipsets")
+            changelist_id = create_changelist_silent(description)
             if log_callback:
                 log_callback(f"[CL] Created new changelist: {changelist_id}")
         
