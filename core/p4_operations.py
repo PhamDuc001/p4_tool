@@ -131,7 +131,9 @@ def validate_device_common_mk_path(depot_path):
 
 def create_changelist_silent(description="Auto changelist"):
     """Create pending changelist with template + dynamic description appended to [Title]"""
+    # Get changelist template
     changelist_spec = run_cmd("p4 change -o")
+    
     # Parse changelist spec và append description sau [Title]
     lines = changelist_spec.split('\n')
     new_lines = []
@@ -296,8 +298,13 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
             reopen_cmd = f"p4 reopen -c {changelist_id} {depot_path}"
             run_cmd(reopen_cmd)
             
+            # Sync file to get latest version after moving to new CL
             if log_callback:
-                log_callback(f"[OK] File moved to CL {changelist_id}")
+                log_callback(f"[SYNC] Getting latest version of file after moving to CL {changelist_id}")
+            sync_file_silent(depot_path)
+            
+            if log_callback:
+                log_callback(f"[OK] File moved to CL {changelist_id} and synced to latest version")
         else:
             # User chose No - keep in old CL
             if log_callback:
@@ -752,7 +759,7 @@ def auto_resolve_missing_branches(
             )
 
             # Step 1: Resolve FLUMEN to depot path and sync
-            flumen_depot_path, _= find_device_common_mk_path(flumen_input)
+            flumen_depot_path, _ = find_device_common_mk_path(flumen_input)
             if not validate_depot_path(flumen_depot_path):
                 raise RuntimeError(f"FLUMEN path does not exist: {flumen_depot_path}")
 
