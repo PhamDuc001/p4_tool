@@ -287,19 +287,37 @@ def find_block_boundaries(lines, start_header, next_header_list):
     return start, end
 
 def analyze_product_override_blocks(original_lines):
-    """Analyze and identify PRODUCT_PROPERTY_OVERRIDES blocks in the section"""
+    """Analyze and identify PRODUCT_PROPERTY_OVERRIDES blocks in the section while preserving conditional structure"""
     override_blocks = []
     i = 1  # Skip header line
+    
+    # Track conditional structure to avoid cross-block property merging
+    conditional_stack = []  # Track if/else/endif nesting
+    current_conditional_start = None
     
     while i < len(original_lines):
         line = original_lines[i]
         stripped_line = line.strip()
+        
+        # Track conditional structure
+        if stripped_line.startswith("ifneq") or stripped_line.startswith("ifdef") or stripped_line.startswith("ifndef"):
+            conditional_stack.append(('if', i))
+            current_conditional_start = i
+        elif stripped_line == "else":
+            if conditional_stack:
+                conditional_stack[-1] = ('else', i)
+        elif stripped_line == "endif":
+            if conditional_stack:
+                conditional_stack.pop()
+                if not conditional_stack:
+                    current_conditional_start = None
         
         if "PRODUCT_PROPERTY_OVERRIDES" in stripped_line and "+=" in stripped_line:
             # Start of new override block
             block_start = i
             block_properties = []
             block_lines = [i]  # Store line indices
+            block_conditional_context = list(conditional_stack)  # Capture current conditional context
             i += 1
             
             # Collect all properties in this block
@@ -307,12 +325,18 @@ def analyze_product_override_blocks(original_lines):
                 prop_line = original_lines[i]
                 prop_stripped = prop_line.strip()
                 
-                if not prop_stripped or prop_stripped.startswith("#"):
+                # Check if we're entering/exiting a different conditional context
+                if prop_stripped.startswith("ifneq") or prop_stripped.startswith("ifdef") or prop_stripped.startswith("ifndef"):
+                    # New conditional block started, end current property collection
+                    break
+                elif prop_stripped == "else" or prop_stripped == "endif":
+                    # Conditional structure changed, end current property collection
+                    break
+                elif not prop_stripped or prop_stripped.startswith("#"):
                     block_lines.append(i)
                     i += 1
                     continue
-                
-                if "=" in prop_stripped:
+                elif "=" in prop_stripped:
                     # Extract property name
                     if prop_stripped.endswith("\\"):
                         prop_content = prop_stripped[:-1].strip()
@@ -331,13 +355,14 @@ def analyze_product_override_blocks(original_lines):
                         break
                     i += 1
                 else:
-                    # Non-property line, end of block
+                    # Non-property line, might be end of block
                     break
             
             override_blocks.append({
                 'start': block_start,
                 'properties': block_properties,
-                'lines': block_lines
+                'lines': block_lines,
+                'conditional_context': block_conditional_context  # Preserve conditional context
             })
         else:
             i += 1
@@ -354,9 +379,17 @@ def get_default_indentation(original_lines):
     return default_indent
 
 def update_product_override_block_with_deletions(original_lines, override_blocks, remaining_properties):
-    """Update PRODUCT_PROPERTY_OVERRIDES blocks with new properties and handle deletions"""
+    """Update PRODUCT_PROPERTY_OVERRIDES blocks with new properties and handle deletions while preserving conditional structure"""
     new_block = [original_lines[0]]  # Keep header line
     processed_lines = set()
+    
+    # Create a mapping of line numbers to original lines for reference
+    line_mapping = {}
+    for i, line in enumerate(original_lines):
+        line_mapping[i] = line
+    
+    # Track which properties have been assigned to specific blocks
+    assigned_properties = set()
     
     for line_idx in range(1, len(original_lines)):  # Skip header
         if line_idx in processed_lines:
@@ -365,99 +398,85 @@ def update_product_override_block_with_deletions(original_lines, override_blocks
         line = original_lines[line_idx]
         stripped_line = line.strip()
         
-        # Keep comments and empty lines as-is
-        if not stripped_line or stripped_line.startswith("#"):
-            new_block.append(line)
-            continue
+        # Keep all lines as-is initially, we'll only modify PRODUCT_PROPERTY_OVERRIDES blocks
+        # This preserves conditional structure completely
+        new_block.append(line)
+        processed_lines.add(line_idx)
+    
+    # Now go through each PRODUCT_PROPERTY_OVERRIDES block and update only the properties within it
+    for block in override_blocks:
+        block_start = block['start']
+        block_lines = block['lines']
+        block_properties = block['properties']
         
-        # Handle PRODUCT_PROPERTY_OVERRIDES blocks
-        current_block = None
-        for block in override_blocks:
-            if line_idx == block['start']:
-                current_block = block
-                break
+        # Only process if this block has properties that need to be updated
+        properties_to_update = {}
+        for prop_key in block_properties:
+            if prop_key in remaining_properties:
+                properties_to_update[prop_key] = remaining_properties[prop_key]
+                assigned_properties.add(prop_key)
         
-        if current_block:
-            # Process entire PRODUCT_PROPERTY_OVERRIDES block
-            new_block.append(original_lines[current_block['start']])  # Add PRODUCT_PROPERTY_OVERRIDES line
-            processed_lines.add(current_block['start'])
-            
-            # Get indentation from existing properties
-            default_indent = "    "
-            for idx in current_block['lines'][1:]:  # Skip PRODUCT_PROPERTY_OVERRIDES line
-                if idx < len(original_lines):
-                    prop_line = original_lines[idx]
-                    if "=" in prop_line.strip() and not prop_line.strip().startswith("#"):
-                        default_indent = prop_line[:len(prop_line) - len(prop_line.lstrip())]
-                        break
-            
-            # Collect all properties for this block (existing + new - deleted)
-            block_props = {}
-            
-            # Add existing properties (only if they exist in remaining_properties - this handles deletions)
-            for idx in current_block['lines'][1:]:  # Skip PRODUCT_PROPERTY_OVERRIDES line
-                if idx < len(original_lines):
-                    prop_line = original_lines[idx]
-                    prop_stripped = prop_line.strip()
+        if properties_to_update:
+            # Update properties within this specific block
+            # We need to find and replace property lines within this block range
+            updated_block_lines = []
+            i = 0
+            while i < len(block_lines):
+                line_idx = block_lines[i]
+                if line_idx >= len(original_lines):
+                    i += 1
+                    continue
                     
-                    if not prop_stripped or prop_stripped.startswith("#"):
-                        continue
+                line = original_lines[line_idx]
+                stripped_line = line.strip()
+                
+                # Check if this is a property line that needs updating
+                if "=" in stripped_line and not stripped_line.startswith("#") and "PRODUCT_PROPERTY_OVERRIDES" not in stripped_line:
+                    # Extract property key
+                    prop_line_content = stripped_line[:-1].strip() if stripped_line.endswith("\\") else stripped_line
+                    if "=" in prop_line_content:
+                        prop_key = prop_line_content.split("=", 1)[0].strip()
                         
-                    if "=" in prop_stripped:
-                        prop_content = prop_stripped[:-1].strip() if prop_stripped.endswith("\\") else prop_stripped
-                        if "=" in prop_content:
-                            key, original_value = prop_content.split("=", 1)
-                            key = key.strip()
+                        # If this property needs to be updated
+                        if prop_key in properties_to_update:
+                            # Get indentation
+                            indent = line[:len(line) - len(line.lstrip())]
                             
-                            # Only include if key exists in remaining_properties (deletion check)
-                            if key in remaining_properties:
-                                block_props[key] = remaining_properties[key]
-                                del remaining_properties[key]
-            
-            # Add any remaining new properties to this block
-            for key, value in list(remaining_properties.items()):
-                block_props[key] = value
-                del remaining_properties[key]
-            
-            # Write all properties in this block (only if there are properties left)
-            if block_props:
-                prop_items = list(block_props.items())
-                for idx, (key, value) in enumerate(prop_items):
-                    if idx == len(prop_items) - 1:  # Last property - no backslash
-                        new_block.append(f"{default_indent}{key}={value}\n")
-                    else:  # Not last property - add backslash
-                        new_block.append(f"{default_indent}{key}={value} \\\n")
-            
-            # Mark all lines in this block as processed
-            for idx in current_block['lines']:
-                processed_lines.add(idx)
-        
-        # Handle regular property lines (not in PRODUCT_PROPERTY_OVERRIDES block)
-        elif "=" in stripped_line and not "PRODUCT_PROPERTY_OVERRIDES" in stripped_line:
-            key, old_value = stripped_line.split("=", 1)
-            key = key.strip()
-            
-            # Only include if key exists in remaining_properties (deletion check)
-            if key in remaining_properties:
-                # Preserve original indentation
-                indent = len(line) - len(line.lstrip())
-                indent_str = line[:indent]
+                            # Create updated line
+                            new_value = properties_to_update[prop_key]
+                            # Check if there's a trailing comment
+                            original_content = prop_line_content.split("=", 1)[1].strip()
+                            if "#" in original_content:
+                                comment_part = original_content.split("#", 1)[1]
+                                new_line = f"{indent}{prop_key}={new_value} #{comment_part}\n"
+                            else:
+                                # Check if this should have a backslash (not the last property in block)
+                                has_backslash = stripped_line.endswith("\\")
+                                if has_backslash:
+                                    new_line = f"{indent}{prop_key}={new_value} \\\n"
+                                else:
+                                    new_line = f"{indent}{prop_key}={new_value}\n"
+                            
+                            updated_block_lines.append((line_idx, new_line))
+                            # Remove from remaining properties since it's been assigned
+                            if prop_key in remaining_properties:
+                                del remaining_properties[prop_key]
+                        else:
+                            # Keep original line
+                            updated_block_lines.append((line_idx, line))
+                    else:
+                        # Keep original line
+                        updated_block_lines.append((line_idx, line))
+                else:
+                    # Keep original line (comments, empty lines, PRODUCT_PROPERTY_OVERRIDES line, etc.)
+                    updated_block_lines.append((line_idx, line))
                 
-                # Get trailing comment if exists
-                trailing_comment = ""
-                if "#" in old_value:
-                    value_part, comment_part = old_value.split("#", 1)
-                    trailing_comment = " #" + comment_part.rstrip()
-                
-                # Use new value
-                new_value = remaining_properties[key]
-                new_line = f"{indent_str}{key}={new_value}{trailing_comment}\n"
-                new_block.append(new_line)
-                del remaining_properties[key]
-            # If key not in remaining_properties, it's deleted - skip this line
-        else:
-            # Keep other lines unchanged
-            new_block.append(line)
+                i += 1
+            
+            # Apply the updates to the new_block
+            for line_idx, updated_line in updated_block_lines:
+                if line_idx < len(new_block):
+                    new_block[line_idx] = updated_line
     
     return new_block, remaining_properties
 
