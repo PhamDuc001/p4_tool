@@ -241,8 +241,8 @@ def write_rscmgr_content(rscmgr_path, content, log_callback=None):
 
 
 def create_rscmgr_file(samsung_path, rscmgr_filename, vince_content, 
-                      changelist_id, log_callback=None):
-    """Create new rscmgr file with VINCE content"""
+                      changelist_id, resource1_libs=None, resource2_libs=None, log_callback=None):
+    """Create new rscmgr file with VINCE content or library content"""
     if log_callback:
         log_callback(f"[CREATE] Creating new rscmgr file: {rscmgr_filename}")
     
@@ -259,6 +259,20 @@ def create_rscmgr_file(samsung_path, rscmgr_filename, vince_content,
         os.makedirs(local_folder_path, exist_ok=True)
         
         local_new_file_path = os.path.join(local_folder_path, rscmgr_filename)
+        
+        # If no VINCE content provided, create content with libraries
+        if not vince_content and (resource1_libs or resource2_libs):
+            from processes.readahead_process import generate_rscmgr_content_with_libraries
+            vince_content = generate_rscmgr_content_with_libraries(resource1_libs, resource2_libs)
+        elif not vince_content:
+            # Create basic rscmgr content with clean structure - NO setprop initially
+            vince_content = """# rscmgr rc file
+service rscmgr /system/bin/rscmgr
+    class core
+    user system
+    group system readahead
+
+"""
         
         with open(local_new_file_path, 'w', encoding='utf-8') as f:
             f.write(vince_content)
@@ -515,7 +529,7 @@ def process_target_branch(branch_input, branch_name, vince_rscmgr_filename,
                     log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
             
             rscmgr_path = create_rscmgr_file(samsung_path, vince_rscmgr_filename, 
-                                            vince_rscmgr_content, current_changelist_id, log_callback)
+                                            vince_rscmgr_content, current_changelist_id, None, None, log_callback)
         
         if log_callback:
             log_callback(f"[{branch_name}] ========== {branch_name} Completed ==========")

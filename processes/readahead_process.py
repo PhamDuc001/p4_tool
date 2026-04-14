@@ -36,6 +36,106 @@ from processes.system_process import (
 from config.p4_config import depot_to_local_path
 
 
+def auto_resolve_missing_branches_readahead(
+    workspaces: dict, rscmgr_filename: str, log_callback=None
+) -> dict:
+    """
+    Auto-resolve missing branches from integration history for readahead operations
+    Returns updated workspaces dict with resolved paths
+    
+    Args:
+        workspaces: Dict with keys "REL", "FLUMEN", "BENI" containing workspace names or paths
+        rscmgr_filename: The rscmgr filename to resolve paths for
+        log_callback: Optional callback function for logging
+    
+    Returns:
+        dict: Updated workspaces with resolved paths
+    """
+    def log(msg):
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
+    
+    # Normalize inputs
+    rel_ws = workspaces.get("REL", "").strip() if workspaces.get("REL") else ""
+    flumen_ws = workspaces.get("FLUMEN", "").strip() if workspaces.get("FLUMEN") else ""
+    beni_ws = workspaces.get("BENI", "").strip() if workspaces.get("BENI") else ""
+    
+    log("[AUTO-RESOLVE] Starting auto-resolution for readahead branches...")
+    log(f"[INPUT] REL: {rel_ws if rel_ws else '(not provided)'}")
+    log(f"[INPUT] FLUMEN: {flumen_ws if flumen_ws else '(not provided)'}")
+    log(f"[INPUT] BENI: {beni_ws if beni_ws else '(not provided)'}")
+    
+    resolved_workspaces = workspaces.copy()
+    
+    try:
+        # Case 1: REL provided, auto-resolve FLUMEN and BENI
+        if rel_ws and not flumen_ws and not beni_ws:
+            log("[AUTO-RESOLVE] Case: REL provided → Auto-resolve FLUMEN and BENI")
+            
+            # Resolve REL to get device_common.mk path
+            rel_device_common_path = find_device_common_mk_path(rel_ws, log_callback)
+            if not rel_device_common_path:
+                raise RuntimeError(f"Cannot find device_common.mk in REL workspace: {rel_ws}")
+            
+            # Map and sync REL
+            map_single_depot(rel_device_common_path, log_callback)
+            sync_file_silent(rel_device_common_path)
+            
+            # Get integration source for FLUMEN from REL
+            flumen_device_common = get_integration_source_depot_path(rel_device_common_path, log_callback)
+            if flumen_device_common and validate_depot_path(flumen_device_common):
+                # Extract workspace name from path (simplified approach)
+                resolved_workspaces["FLUMEN"] = flumen_device_common
+                log(f"[AUTO] Resolved FLUMEN device_common.mk: {flumen_device_common}")
+                
+                # Get integration source for BENI from FLUMEN
+                map_single_depot(flumen_device_common, log_callback)
+                sync_file_silent(flumen_device_common)
+                
+                beni_device_common = get_integration_source_depot_path(flumen_device_common, log_callback)
+                if beni_device_common and validate_depot_path(beni_device_common):
+                    resolved_workspaces["BENI"] = beni_device_common
+                    log(f"[AUTO] Resolved BENI device_common.mk: {beni_device_common}")
+                else:
+                    log("[WARNING] Could not resolve BENI from FLUMEN")
+            else:
+                log("[WARNING] Could not resolve FLUMEN from REL")
+        
+        # Case 2: FLUMEN provided, auto-resolve BENI
+        elif flumen_ws and not beni_ws:
+            log("[AUTO-RESOLVE] Case: FLUMEN provided → Auto-resolve BENI")
+            
+            # Resolve FLUMEN to get device_common.mk path
+            flumen_device_common_path = find_device_common_mk_path(flumen_ws, log_callback)
+            if not flumen_device_common_path:
+                raise RuntimeError(f"Cannot find device_common.mk in FLUMEN workspace: {flumen_ws}")
+            
+            # Map and sync FLUMEN
+            map_single_depot(flumen_device_common_path, log_callback)
+            sync_file_silent(flumen_device_common_path)
+            
+            # Get integration source for BENI from FLUMEN
+            beni_device_common = get_integration_source_depot_path(flumen_device_common_path, log_callback)
+            if beni_device_common and validate_depot_path(beni_device_common):
+                resolved_workspaces["BENI"] = beni_device_common
+                log(f"[AUTO] Resolved BENI device_common.mk: {beni_device_common}")
+            else:
+                log("[WARNING] Could not resolve BENI from FLUMEN")
+        
+        # Case 3: All provided or no auto-resolve needed
+        else:
+            log("[AUTO-RESOLVE] No auto-resolve needed - using provided inputs")
+        
+        log("[AUTO-RESOLVE] Completed successfully")
+        return resolved_workspaces
+        
+    except Exception as e:
+        log(f"[AUTO-RESOLVE ERROR] {str(e)}")
+        # Return original workspaces on error
+        return workspaces
+
 def generate_readahead_description(resource1_libs, resource2_libs):
     """
     Generate static changelist description for Readahead mode
@@ -205,9 +305,64 @@ def copy_rscmgr_content(source_path, target_path, log_callback=None):
         raise
 
 
-def create_rscmgr_file(samsung_path, rscmgr_filename, vince_rscmgr_path, changelist_id, log_callback=None):
+def generate_rscmgr_content_with_libraries(resource1_libs=None, resource2_libs=None):
     """
-    Create new rscmgr file by syncing folder and creating file with VINCE content
+    Generate rscmgr content with proper resource sections and libraries
+    
+    Args:
+        resource1_libs: List of Resource=1 libraries
+        resource2_libs: List of Resource=2 libraries
+    
+    Returns:
+        str: Generated rscmgr content
+    """
+    resource1_libs = resource1_libs or []
+    resource2_libs = resource2_libs or []
+    
+    # Start with header
+    content_lines = ["# rscmgr rc file"]
+    
+    highest_resource = 0
+    
+    # Add Resource=1 section if libraries exist
+    if resource1_libs:
+        highest_resource = max(highest_resource, 1)
+        content_lines.append("")
+        content_lines.append("on property:sys.readahead.resource=1")
+        for lib in resource1_libs:
+            content_lines.append(f"    readahead {lib} --fully")
+    
+    # Add Resource=2 section if libraries exist
+    if resource2_libs:
+        highest_resource = max(highest_resource, 2)
+        content_lines.append("")
+        content_lines.append("on property:sys.readahead.resource=2")
+        for lib in resource2_libs:
+            content_lines.append(f"    readahead {lib} --fully")
+    
+    # Add setprop in the highest resource section
+    if highest_resource > 0:
+        if highest_resource == 1:
+            content_lines.append("    setprop sys.readahead.resource 0")
+        elif highest_resource == 2:
+            content_lines.append("    setprop sys.readahead.resource 0")
+    
+    return "\n".join(content_lines) + "\n"
+
+
+def create_rscmgr_file(samsung_path, rscmgr_filename, vince_rscmgr_path, changelist_id, 
+                      resource1_libs=None, resource2_libs=None, log_callback=None):
+    """
+    Create new rscmgr file by syncing folder and creating file with VINCE content or library content
+    
+    Args:
+        samsung_path: Samsung vendor path
+        rscmgr_filename: Name of rscmgr file
+        vince_rscmgr_path: Path to VINCE rscmgr file (if exists)
+        changelist_id: P4 changelist ID
+        resource1_libs: List of Resource=1 libraries (optional)
+        resource2_libs: List of Resource=2 libraries (optional)
+        log_callback: Logging callback function
     """
     if log_callback:
         log_callback(f"[SYSTEM] Creating new rscmgr file: {rscmgr_filename}")
@@ -232,20 +387,14 @@ def create_rscmgr_file(samsung_path, rscmgr_filename, vince_rscmgr_path, changel
         # Create new file path
         local_new_file_path = os.path.join(local_folder_path, rscmgr_filename)
         
-        # Read VINCE content if provided, otherwise create empty file
+        # Read VINCE content if provided, otherwise create content with libraries
         if vince_rscmgr_path:
             vince_local = depot_to_local_path(vince_rscmgr_path)
             with open(vince_local, 'r', encoding='utf-8') as f:
                 vince_content = f.read()
         else:
-            # Create basic rscmgr content with clean structure - NO setprop initially
-            vince_content = """# rscmgr rc file
-service rscmgr /system/bin/rscmgr
-    class core
-    user system
-    group system readahead
-
-"""
+            # Create rscmgr content with provided libraries
+            vince_content = generate_rscmgr_content_with_libraries(resource1_libs, resource2_libs)
         
         # Create new file with content
         with open(local_new_file_path, 'w', encoding='utf-8') as f:
@@ -478,7 +627,7 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
                 if log_callback:
                     log_callback(f"[CL] Created pending changelist: {current_changelist_id}")
             
-            # Create new rscmgr file
+            # Create new rscmgr file with library content
             new_rscmgr_path = create_rscmgr_file(samsung_path, vince_rscmgr_filename, vince_rscmgr_path, current_changelist_id, log_callback)
             
             if log_callback:
@@ -931,14 +1080,14 @@ def process_single_branch(branch, branch_input, rscmgr_filename, resource1_libs,
             if log_callback:
                 log_callback(f"[{branch}] Creating new rscmgr file: {rscmgr_path}")
             
-            # Create with empty content first, then update libraries if needed
-            create_rscmgr_file(samsung_path, rscmgr_filename, "", changelist_id, log_callback)
+            # Create with library content directly
+            create_rscmgr_file(samsung_path, rscmgr_filename, "", changelist_id, resource1_libs, resource2_libs, log_callback)
             
-            # Update libraries for ALL branches (not just first branch)
-            if resource1_libs or resource2_libs:
-                update_libraries_in_rscmgr(rscmgr_path, resource1_libs, resource2_libs, log_callback)
-                if log_callback:
-                    log_callback(f"[{branch}] Updated libraries in rscmgr file")
+            if log_callback:
+                if resource1_libs or resource2_libs:
+                    log_callback(f"[{branch}] Created rscmgr file with {len(resource1_libs)} Resource=1 and {len(resource2_libs)} Resource=2 libraries")
+                else:
+                    log_callback(f"[{branch}] Created empty rscmgr file")
         
         if log_callback:
             log_callback(f"[{branch}] ========== {branch} Completed ==========")
