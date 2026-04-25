@@ -1,0 +1,138 @@
+import sys
+import subprocess
+import re
+import argparse
+
+def run_cmd(cmd, input_text=None):
+    """Execute command and return output"""
+    result = subprocess.run(
+        cmd, input=input_text, capture_output=True, text=True, shell=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed: {cmd}\n{result.stderr}")
+    return result.stdout.strip()
+
+def get_client_name():
+    """Retrieve the current P4 client name"""
+    try:
+        output = run_cmd("p4 info")
+        match = re.search(r"^Client name:\s*(.+)$", output, re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+        print("Warning: Could not find client name in p4 info.")
+        return None
+    except Exception as e:
+        print(f"Error getting p4 info: {e}")
+        return None
+
+def map_single_depot(depot_path):
+    """Map single depot path to client spec"""
+    client_name = get_client_name()
+    if not client_name:
+        raise RuntimeError("Client name not initialized. Please check P4 environment.")
+    
+    mapping_line = f"\t{depot_path}\t//{client_name}/{depot_path[2:]}"
+    
+    client_spec = run_cmd("p4 client -o")
+    lines = client_spec.splitlines()
+    
+    new_lines = []
+    for line in lines:
+        if depot_path in line:
+            continue  # Remove old mapping
+        new_lines.append(line)
+    
+    new_lines.append(mapping_line)
+    new_spec = "\n".join(new_lines)
+    run_cmd("p4 client -i", input_text=new_spec)
+    print(f"[OK] Mapped {depot_path} to client spec.")
+
+def sync_file_silent(depot_path):
+    """Sync file from depot"""
+    run_cmd(f"p4 sync {depot_path}")
+    print(f"[OK] Synced {depot_path}")
+
+def checkout_file_silent(depot_path, changelist_id):
+    """Safe checkout file to a specific changelist"""
+    try:
+        check_cmd = f"p4 opened {depot_path}"
+        result = subprocess.run(check_cmd, capture_output=True, text=True, shell=True)
+        
+        if result.returncode != 0 or "not opened on this client" in result.stdout:
+            print(f"[CHECKOUT] File not opened, checking out to CL {changelist_id}")
+            run_cmd(f"p4 edit -c {changelist_id} {depot_path}")
+            print(f"[OK] Checked out to CL {changelist_id}")
+            return
+        
+        output = result.stdout.strip()
+        cl_match = re.search(r'change (\d+)', output)
+        
+        if not cl_match:
+            print(f"[WARNING] File opened but CL not detected, attempting checkout")
+            run_cmd(f"p4 edit -c {changelist_id} {depot_path}")
+            return
+        
+        current_cl = cl_match.group(1)
+        
+        if current_cl == str(changelist_id):
+            print(f"[INFO] File already in target CL {changelist_id}, skipping")
+            return
+        
+        print(f"[WARNING] File is already opened in CL {current_cl}. Reopening in {changelist_id}...")
+        reopen_cmd = f"p4 reopen -c {changelist_id} {depot_path}"
+        run_cmd(reopen_cmd)
+        print(f"[OK] File moved to CL {changelist_id}")
+            
+    except Exception as e:
+        print(f"[ERROR] Checkout operation failed: {str(e)}")
+        raise
+
+def create_changelist_silent(description):
+    """Create pending changelist and return its ID"""
+    changelist_spec = run_cmd("p4 change -o")
+    new_spec = re.sub(r"<enter description here>", description, changelist_spec)
+    changelist_result = run_cmd("p4 change -i", input_text=new_spec)
+    changelist_id = re.search(r"Change (\d+)", changelist_result).group(1)
+    return changelist_id
+
+def command_map_sync(args):
+    print(f"Mapping and syncing: {args.depot_path}")
+    map_single_depot(args.depot_path)
+    sync_file_silent(args.depot_path)
+    print("Done map and sync.")
+
+def command_checkout(args):
+    print(f"Checking out: {args.depot_path} to CL {args.changelist_id}")
+    checkout_file_silent(args.depot_path, args.changelist_id)
+    print("Done checkout.")
+
+def command_create_cl(args):
+    print(f"Creating silent changelist with desc: '{args.desc}'")
+    cl_id = create_changelist_silent(args.desc)
+    print(f"Created Changelist: {cl_id}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Standalone P4 Basic Operations AI Wrapper")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    parser_map = subparsers.add_parser("map-sync", help="Map a depot path to client and sync it")
+    parser_map.add_argument("--depot_path", required=True, help="P4 Depot Path to map and sync")
+
+    parser_checkout = subparsers.add_parser("checkout", help="Safe checkout file to CL")
+    parser_checkout.add_argument("--depot_path", required=True, help="P4 Depot Path to checkout")
+    parser_checkout.add_argument("--changelist_id", required=True, help="Target Changelist ID")
+
+    parser_cl = subparsers.add_parser("create-cl", help="Create a silent changelist")
+    parser_cl.add_argument("--desc", default="Auto changelist generated by AI Agent", help="Description for CL")
+
+    args = parser.parse_args()
+
+    if args.command == "map-sync":
+        command_map_sync(args)
+    elif args.command == "checkout":
+        command_checkout(args)
+    elif args.command == "create-cl":
+        command_create_cl(args)
+
+if __name__ == "__main__":
+    main()

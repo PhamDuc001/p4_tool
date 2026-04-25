@@ -345,17 +345,19 @@ class TuningTab:
     def _finalize_properties_loading(self, final_properties):
         """Finalize the properties loading process"""
         self.loaded_properties = final_properties
-        
-        # Store original properties (without metadata)
+
+        # Store original properties (without metadata) — preserve full conditional structure
         self.original_properties = {}
         for key, value in self.loaded_properties.items():
             if key != "_metadata":
-                self.original_properties[key] = (
-                    value.copy() if isinstance(value, dict) else value
-                )
+                if isinstance(value, dict):
+                    import copy
+                    self.original_properties[key] = copy.deepcopy(value)
+                else:
+                    self.original_properties[key] = value
 
-        # Populate table
-        self._populate_properties_table(self.loaded_properties)
+        # Populate table with conditional-aware display
+        self._populate_properties_table_v2(self.loaded_properties)
         self.apply_tuning_btn.configure(state="normal")
         self.gui_utils.update_status(
             "Properties loaded successfully. You can now modify values and apply to all paths."
@@ -514,43 +516,69 @@ class TuningTab:
                 )
 
     def _properties_unchanged(self, current_properties):
-        """Check if properties have been modified or deleted"""
+        """Check if properties have been modified or deleted (supports v2 conditional structure)"""
         if not self.original_properties:
             return True
 
-        # Compare LMKD properties
-        original_lmkd = self.original_properties.get("LMKD", {})
-        current_lmkd = current_properties.get("LMKD", {})
-        if original_lmkd != current_lmkd:
-            return False
+        import copy
+        for category in ("LMKD", "Chimera"):
+            orig = self.original_properties.get(category, {})
+            curr = current_properties.get(category, {})
 
-        # Compare Chimera properties
-        original_chimera = self.original_properties.get("Chimera", {})
-        current_chimera = current_properties.get("Chimera", {})
-        if original_chimera != current_chimera:
-            return False
+            # v2 structure: compare _flat and _conditional separately
+            if isinstance(orig, dict) and '_flat' in orig:
+                if orig.get('_flat', {}) != curr.get('_flat', {}):
+                    return False
+                orig_cond = orig.get('_conditional', [])
+                curr_cond = curr.get('_conditional', [])
+                if len(orig_cond) != len(curr_cond):
+                    return False
+                for ob, cb in zip(orig_cond, curr_cond):
+                    if ob.get('if_props') != cb.get('if_props'):
+                        return False
+                    if ob.get('else_props') != cb.get('else_props'):
+                        return False
+            else:
+                # Legacy flat dict comparison
+                if orig != curr:
+                    return False
 
         return True
 
     def _get_changes_summary(self, current_properties):
-        """Get summary of changes including additions, modifications, and deletions"""
+        """Get summary of changes including additions, modifications, and deletions (v2 aware)"""
         changes = []
 
-        # Compare LMKD properties
-        original_lmkd = self.original_properties.get("LMKD", {})
-        current_lmkd = current_properties.get("LMKD", {})
-        lmkd_changes = self._compare_property_categories(
-            original_lmkd, current_lmkd, "LMKD"
-        )
-        changes.extend(lmkd_changes)
+        for category in ("LMKD", "Chimera"):
+            orig = self.original_properties.get(category, {})
+            curr = current_properties.get(category, {})
 
-        # Compare Chimera properties
-        original_chimera = self.original_properties.get("Chimera", {})
-        current_chimera = current_properties.get("Chimera", {})
-        chimera_changes = self._compare_property_categories(
-            original_chimera, current_chimera, "Chimera"
-        )
-        changes.extend(chimera_changes)
+            if isinstance(orig, dict) and '_flat' in orig:
+                # v2 structure
+                flat_changes = self._compare_property_categories(
+                    orig.get('_flat', {}), curr.get('_flat', {}), f"{category}[flat]"
+                )
+                changes.extend(flat_changes)
+
+                orig_cond = orig.get('_conditional', [])
+                curr_cond = curr.get('_conditional', [])
+                for i, (ob, cb) in enumerate(zip(orig_cond, curr_cond)):
+                    cond_label = ob.get('condition', f'block{i}')[:40]
+                    if_changes = self._compare_property_categories(
+                        ob.get('if_props', {}), cb.get('if_props', {}),
+                        f"{category}[if: {cond_label}]"
+                    )
+                    changes.extend(if_changes)
+                    if ob.get('else_props') is not None or cb.get('else_props') is not None:
+                        else_changes = self._compare_property_categories(
+                            ob.get('else_props') or {}, cb.get('else_props') or {},
+                            f"{category}[else]"
+                        )
+                        changes.extend(else_changes)
+            else:
+                # Legacy flat dict
+                category_changes = self._compare_property_categories(orig, curr, category)
+                changes.extend(category_changes)
 
         return "\n".join(changes) if changes else ""
 
@@ -579,34 +607,93 @@ class TuningTab:
         return changes
 
     def _populate_properties_table(self, properties_data):
-        """Populate the properties table with loaded data"""
+        """Populate the properties table with loaded data (v2 conditional structure)"""
+        self._populate_properties_table_v2(properties_data)
+
+    def _populate_properties_table_v2(self, properties_data):
+        """
+        Populate the properties table using the v2 conditional-aware structure.
+        Each category is displayed with:
+          - Flat properties as direct children of the category node
+          - Each conditional block as a sub-group with [if] and [else] nodes
+        """
         # Clear existing items
         for item in self.properties_tree.get_children():
             self.properties_tree.delete(item)
 
-        # Add LMKD properties
-        if "LMKD" in properties_data and properties_data["LMKD"]:
-            lmkd_parent = self.properties_tree.insert(
-                "", "end", text="LMKD", values=("LMKD", "", "")
+        for category in ("LMKD", "Chimera"):
+            cat_data = properties_data.get(category)
+            if not cat_data:
+                continue
+
+            # Support both v2 dict and legacy flat dict
+            if isinstance(cat_data, dict) and '_flat' in cat_data:
+                flat_props = cat_data.get('_flat', {})
+                conditional_blocks = cat_data.get('_conditional', [])
+            else:
+                # Legacy: cat_data is a flat {prop: value} dict
+                flat_props = cat_data if isinstance(cat_data, dict) else {}
+                conditional_blocks = []
+
+            # Skip if empty
+            if not flat_props and not conditional_blocks:
+                continue
+
+            # Category parent node
+            cat_parent = self.properties_tree.insert(
+                "", "end", text=category, values=(category, "", ""), tags=("category",)
             )
-            for prop, value in properties_data["LMKD"].items():
-                self.properties_tree.insert(
-                    lmkd_parent, "end", values=("LMKD", prop, value)
+
+            # --- Conditional blocks first (before flat, matching file order) ---
+            for i, block in enumerate(conditional_blocks):
+                condition = block.get('condition', f'block_{i}')
+                if_props = block.get('if_props', {})
+                else_props = block.get('else_props')
+
+                # Condition group header
+                short_cond = condition[:60] + ('...' if len(condition) > 60 else '')
+                cond_node = self.properties_tree.insert(
+                    cat_parent, "end",
+                    text=f"[{short_cond}]",
+                    values=(category, f"[cond:{i}]", condition),
+                    tags=("condition_group", f"block_{i}")
                 )
 
-        # Add Chimera properties
-        if "Chimera" in properties_data and properties_data["Chimera"]:
-            chimera_parent = self.properties_tree.insert(
-                "", "end", text="Chimera", values=("Chimera", "", "")
-            )
-            for prop, value in properties_data["Chimera"].items():
+                # if-block properties
+                for prop, value in if_props.items():
+                    self.properties_tree.insert(
+                        cond_node, "end",
+                        values=(category, prop, value),
+                        tags=("conditional_property", "if_block", f"block_{i}_if")
+                    )
+
+                # else node + else properties
+                if else_props is not None:
+                    else_node = self.properties_tree.insert(
+                        cond_node, "end",
+                        text="[else]",
+                        values=(category, "[else]", ""),
+                        tags=("else_group", f"block_{i}")
+                    )
+                    for prop, value in else_props.items():
+                        self.properties_tree.insert(
+                            else_node, "end",
+                            values=(category, prop, value),
+                            tags=("conditional_property", "else_block", f"block_{i}_else")
+                        )
+                    self.properties_tree.item(else_node, open=True)
+
+                self.properties_tree.item(cond_node, open=True)
+
+            # --- Flat properties ---
+            for prop, value in flat_props.items():
                 self.properties_tree.insert(
-                    chimera_parent, "end", values=("Chimera", prop, value)
+                    cat_parent, "end",
+                    values=(category, prop, value),
+                    tags=("property",)
                 )
 
-        # Expand all nodes
-        for item in self.properties_tree.get_children():
-            self.properties_tree.item(item, open=True)
+            self.properties_tree.item(cat_parent, open=True)
 
     def add_property(self, category):
         """Add new property to the table"""
@@ -645,20 +732,156 @@ class TuningTab:
 
         item = selected[0]
         values = self.properties_tree.item(item, "values")
+        tags = self.properties_tree.item(item, "tags")
 
         # Don't edit category headers
         if len(values) < 3 or not values[1]:
             return
 
         category, prop_name, prop_value = values
-        dialog = PropertyDialog(
-            self.gui_utils.root, f"Edit {category} Property", prop_name, prop_value
-        )
-        if dialog.result:
-            new_prop_name, new_prop_value = dialog.result
-            self.properties_tree.item(
-                item, values=(category, new_prop_name, new_prop_value)
+
+        # Don't edit condition group headers or else group headers
+        if not prop_name or prop_name.startswith("[cond:") or prop_name == "[else]":
+            return
+
+        # For conditional properties (if/else block items), edit the value directly.
+        # The user clicked exactly one context node — just edit that specific value.
+        if "conditional_property" in tags:
+            ctx_label = "if" if "if_block" in tags else "else"
+            dialog = PropertyDialog(
+                self.gui_utils.root,
+                f"Edit {category} Property  [{ctx_label} context]",
+                prop_name, prop_value
             )
+            if dialog.result:
+                _, new_prop_value = dialog.result
+                self.properties_tree.item(item, values=(category, prop_name, new_prop_value))
+        else:
+            # Flat property editing
+            dialog = PropertyDialog(
+                self.gui_utils.root, f"Edit {category} Property", prop_name, prop_value
+            )
+            if dialog.result:
+                new_prop_name, new_prop_value = dialog.result
+                self.properties_tree.item(
+                    item, values=(category, new_prop_name, new_prop_value)
+                )
+
+
+    def _edit_conditional_property(self, item, category, prop_name, prop_value, tags):
+        """Edit conditional property với ENHANCED context awareness"""
+        # Get all contexts for this property name
+        context_info = self._get_all_contexts_for_property(prop_name, category)
+        
+        # If multiple contexts exist, use enhanced dialog
+        if context_info and len(context_info.get('contexts', [])) > 1:
+            # Show enhanced conditional property dialog
+            from gui.property_dialog import EnhancedConditionalPropertyDialog
+            
+            # Prepare context values for dialog
+            prop_values_by_context = {}
+            for context in context_info['contexts']:
+                context_name = context['name']
+                context_value = context['value']
+                prop_values_by_context[context_name] = context_value
+            
+            dialog = EnhancedConditionalPropertyDialog(
+                self.gui_utils.root, 
+                f"Edit {category} Property - Conditional Contexts", 
+                prop_name, 
+                prop_values_by_context
+            )
+            
+            if dialog.result:
+                # Handle enhanced conditional property update
+                self._update_enhanced_conditional_property_values(item, dialog.result, category)
+        else:
+            # Simple edit for single context or flat property
+            dialog = PropertyDialog(
+                self.gui_utils.root, f"Edit {category} Property", prop_name, prop_value
+            )
+            if dialog.result:
+                new_prop_name, new_prop_value = dialog.result
+                self.properties_tree.item(
+                    item, values=(category, new_prop_name, new_prop_value)
+                )
+
+    def _get_all_contexts_for_property(self, prop_name, category):
+        """Get all contexts for a specific property name"""
+        contexts = []
+        
+        # Find all instances of this property in different contexts
+        for parent in self.properties_tree.get_children():
+            parent_values = self.properties_tree.item(parent, "values")
+            if parent_values[0] == category:
+                # Check direct children (flat properties)
+                for child in self.properties_tree.get_children(parent):
+                    child_values = self.properties_tree.item(child, "values")
+                    if len(child_values) >= 3 and child_values[1] == prop_name:
+                        contexts.append({
+                            'name': 'default',
+                            'value': child_values[2],
+                            'item': child,
+                            'type': 'flat'
+                        })
+                
+                # Check conditional context children
+                for context_parent in self.properties_tree.get_children(parent):
+                    context_values = self.properties_tree.item(context_parent, "values")
+                    if len(context_values) >= 2 and context_values[1].startswith('['):
+                        # This is a conditional context
+                        context_name = context_values[1]
+                        for prop_item in self.properties_tree.get_children(context_parent):
+                            prop_values = self.properties_tree.item(prop_item, "values")
+                            if len(prop_values) >= 3 and prop_values[1] == prop_name:
+                                contexts.append({
+                                    'name': context_name,
+                                    'value': prop_values[2],
+                                    'item': prop_item,
+                                    'type': 'conditional'
+                                })
+        
+        return {
+            'property': prop_name,
+            'category': category,
+            'contexts': contexts
+        }
+
+    def _update_enhanced_conditional_property_values(self, original_item, dialog_result, category):
+        """Update property values trong các contexts được chọn"""
+        prop_name = dialog_result['name']
+        values_by_context = dialog_result['values_by_context']
+        selected_contexts = dialog_result.get('selected_contexts', list(values_by_context.keys()))
+        
+        # Update values trong từng context được chọn
+        for parent in self.properties_tree.get_children():
+            parent_values = self.properties_tree.item(parent, "values")
+            if parent_values[0] == category:
+                # Update trong conditional contexts
+                for context_parent in self.properties_tree.get_children(parent):
+                    context_values = self.properties_tree.item(context_parent, "values")
+                    if len(context_values) >= 2 and context_values[1] in selected_contexts:
+                        # Update properties trong context này
+                        for prop_item in self.properties_tree.get_children(context_parent):
+                            prop_values = self.properties_tree.item(prop_item, "values")
+                            if len(prop_values) >= 3 and prop_values[1] == prop_name:
+                                context_name = context_values[1]
+                                if context_name in values_by_context:
+                                    new_value = values_by_context[context_name]
+                                    self.properties_tree.item(
+                                        prop_item, values=(category, prop_name, new_value)
+                                    )
+                
+                # Update flat properties nếu có
+                for child in self.properties_tree.get_children(parent):
+                    child_values = self.properties_tree.item(child, "values")
+                    if len(child_values) >= 3 and child_values[1] == prop_name:
+                        # Nếu context 'default' được chọn, update flat property
+                        if 'default' in selected_contexts and 'default' in values_by_context:
+                            new_value = values_by_context['default']
+                            self.properties_tree.item(
+                                child, values=(category, prop_name, new_value)
+                            )
 
     def delete_property(self):
         """Delete selected property with enhanced logic"""
@@ -732,17 +955,334 @@ class TuningTab:
         )
 
     def _get_table_properties(self):
-        """Extract properties from the table"""
-        properties = {"LMKD": {}, "Chimera": {}}
+        """
+        Extract properties from the table.
+        Returns v2 conditional-aware structure:
+        {
+          "LMKD": {"_flat": {...}, "_conditional": [{condition, if_props, else_props}, ...]},
+          "Chimera": { ... }
+        }
+        """
+        properties = {
+            "LMKD": {"_flat": {}, "_conditional": []},
+            "Chimera": {"_flat": {}, "_conditional": []}
+        }
 
-        for parent in self.properties_tree.get_children():
-            parent_values = self.properties_tree.item(parent, "values")
-            category = parent_values[0]
+        for cat_item in self.properties_tree.get_children():
+            cat_values = self.properties_tree.item(cat_item, "values")
+            category = cat_values[0] if cat_values else None
+            if category not in properties:
+                continue
 
-            if category in properties:
-                for child in self.properties_tree.get_children(parent):
-                    child_values = self.properties_tree.item(child, "values")
+            # Rebuild the conditional block list from tree structure ---
+            # We rebuild from original_properties to keep condition strings intact,
+            # then patch in the values the user edited in the tree.
+            orig_conditionals = self.original_properties.get(category, {}).get('_conditional', [])
+            import copy
+            rebuilt_conditionals = copy.deepcopy(orig_conditionals)
+
+            for child in self.properties_tree.get_children(cat_item):
+                child_values = self.properties_tree.item(child, "values")
+                child_tags = self.properties_tree.item(child, "tags")
+
+                if "condition_group" in child_tags:
+                    # This is a conditional group node — get block index from tag
+                    block_idx = None
+                    for tag in child_tags:
+                        if tag.startswith("block_") and not tag.endswith("_if") and not tag.endswith("_else"):
+                            try:
+                                block_idx = int(tag.split("_")[1])
+                            except (IndexError, ValueError):
+                                pass
+
+                    if block_idx is None or block_idx >= len(rebuilt_conditionals):
+                        continue
+
+                    # Clear existing props for this block — will refill from tree
+                    rebuilt_conditionals[block_idx]['if_props'] = {}
+
+                    for cond_child in self.properties_tree.get_children(child):
+                        cc_values = self.properties_tree.item(cond_child, "values")
+                        cc_tags = self.properties_tree.item(cond_child, "tags")
+
+                        if "else_group" in cc_tags:
+                            # else sub-group
+                            rebuilt_conditionals[block_idx]['else_props'] = {}
+                            for else_child in self.properties_tree.get_children(cond_child):
+                                ec_v = self.properties_tree.item(else_child, "values")
+                                if len(ec_v) >= 3 and ec_v[1] and ec_v[1] != '[else]':
+                                    rebuilt_conditionals[block_idx]['else_props'][ec_v[1]] = ec_v[2]
+
+                        elif "if_block" in cc_tags:
+                            if len(cc_values) >= 3 and cc_values[1]:
+                                rebuilt_conditionals[block_idx]['if_props'][cc_values[1]] = cc_values[2]
+
+                elif not child_tags or "property" in child_tags:
+                    # Flat property (direct child of category)
                     if len(child_values) >= 3 and child_values[1]:
-                        properties[category][child_values[1]] = child_values[2]
+                        properties[category]['_flat'][child_values[1]] = child_values[2]
+
+            properties[category]['_conditional'] = rebuilt_conditionals
 
         return properties
+
+    def _get_conditional_table_properties(self):
+        """Extract properties từ table với conditional context information"""
+        properties = {"LMKD": {}, "Chimera": {}}
+        conditional_properties = {"LMKD": {}, "Chimera": {}}
+
+        # Duyệt qua tất cả items trong tree
+        for item in self.properties_tree.get_children():
+            self._extract_properties_from_item(item, properties, conditional_properties)
+
+        return properties, conditional_properties
+
+    def _extract_properties_from_item(self, item, properties, conditional_properties, parent_context=None):
+        """Recursive helper để extract properties từ tree items"""
+        values = self.properties_tree.item(item, "values")
+        tags = self.properties_tree.item(item, "tags")
+        
+        # Nếu là property item (có đủ 3 values và có property name)
+        if len(values) >= 3 and values[1]:
+            category = values[0]
+            prop_name = values[1]
+            prop_value = values[2]
+            
+            # Check nếu là conditional property
+            if "conditional_property" in tags:
+                # Xác định conditional context từ parent
+                context = self._get_conditional_context(item)
+                if context:
+                    if category not in conditional_properties:
+                        conditional_properties[category] = {}
+                    if prop_name not in conditional_properties[category]:
+                        conditional_properties[category][prop_name] = {}
+                    
+                    conditional_properties[category][prop_name][context] = prop_value
+            else:
+                # Flat property
+                if category in properties:
+                    properties[category][prop_name] = prop_value
+        
+        # Recursively process children
+        for child in self.properties_tree.get_children(item):
+            self._extract_properties_from_item(child, properties, conditional_properties, item)
+
+    def _get_conditional_context(self, item):
+        """Get conditional context cho một property item"""
+        # Get parent chain để xác định context
+        parent = self.properties_tree.parent(item)
+        if parent:
+            parent_values = self.properties_tree.item(parent, "values")
+            if len(parent_values) >= 2 and parent_values[1]:
+                context_text = parent_values[1]
+                if context_text.startswith('[') and context_text.endswith(']'):
+                    return context_text[1:-1]  # Remove brackets
+                elif context_text == '[else]':
+                    return 'else'
+        return 'default'
+
+    # ============================================================================
+    # CONDITIONAL STRUCTURE DISPLAY FUNCTIONS (NEW)
+    # ============================================================================
+
+    def _load_conditional_properties_for_display(self, file_path):
+        """Load properties với conditional context information cho GUI display"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            
+            from core.file_operations import analyze_conditional_structure
+            conditional_analysis = analyze_conditional_structure(file_content)
+            
+            # Structure data cho GUI display
+            display_data = {}
+            
+            for section_name, section_data in conditional_analysis.items():
+                display_data[section_name] = {
+                    'conditional_blocks': [],
+                    'flat_properties': {}  # For backward compatibility
+                }
+                
+                # Process conditional blocks
+                for block in section_data['blocks']:
+                    block_info = {
+                        'condition': block['condition'],
+                        'properties': {},
+                        'else_properties': {}
+                    }
+                    
+                    # Add properties from if block
+                    for prop in block['properties']:
+                        block_info['properties'][prop['key']] = prop['value']
+                        display_data[section_name]['flat_properties'][prop['key']] = prop['value']
+                    
+                    # Add properties from else block
+                    if block['else_properties']:
+                        for prop in block['else_properties']:
+                            block_info['else_properties'][prop['key']] = prop['value']
+                            # Note: Trong flat view, else value sẽ override if value
+                            display_data[section_name]['flat_properties'][prop['key']] = prop['value']
+                    
+                    display_data[section_name]['conditional_blocks'].append(block_info)
+            
+            return display_data
+            
+        except Exception as e:
+            self.log_callback(f"[ERROR] Failed to load conditional properties: {str(e)}")
+            return None
+
+    def _populate_properties_table_conditional(self, properties_data, file_path=None):
+        """Populate the properties table với conditional structure display - ENHANCED"""
+        # Clear existing items
+        for item in self.properties_tree.get_children():
+            self.properties_tree.delete(item)
+
+        # Add LMKD properties (giữ nguyên để backward compatibility)
+        if "LMKD" in properties_data and properties_data["LMKD"]:
+            lmkd_parent = self.properties_tree.insert(
+                "", "end", text="LMKD", values=("LMKD", "", ""), tags=("category",)
+            )
+            for prop, value in properties_data["LMKD"].items():
+                self.properties_tree.insert(
+                    lmkd_parent, "end", values=("LMKD", prop, value), tags=("property",)
+                )
+
+        # Add Chimera properties với ENHANCED conditional structure display
+        if "Chimera" in properties_data and properties_data["Chimera"]:
+            if file_path:
+                # Try to load conditional structure for detailed display
+                conditional_data = self._load_conditional_properties_for_display(file_path)
+                if conditional_data and "Chimera" in conditional_data:
+                    self._populate_enhanced_conditional_chimera_section(conditional_data["Chimera"])
+                else:
+                    # Fallback to flat display
+                    self._populate_flat_chimera_section(properties_data["Chimera"])
+            else:
+                # Fallback to flat display
+                self._populate_flat_chimera_section(properties_data["Chimera"])
+
+        # Expand all nodes
+        for item in self.properties_tree.get_children():
+            self.properties_tree.item(item, open=True)
+
+    def _populate_enhanced_conditional_chimera_section(self, conditional_data):
+        """Populate Chimera section với ENHANCED conditional structure display"""
+        chimera_parent = self.properties_tree.insert(
+            "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
+        )
+        
+        # Add conditional blocks với ENHANCED display
+        for i, block in enumerate(conditional_data['conditional_blocks']):
+            # Create ENHANCED condition header với context information
+            condition_text = block['condition']
+            condition_display = f"[{condition_text}]" if not condition_text.startswith('else') else "[else]"
+            
+            condition_parent = self.properties_tree.insert(
+                chimera_parent, "end", 
+                text=condition_display,
+                values=("Chimera", condition_display, f"Conditional Context {i+1}"),
+                tags=("condition", "conditional_context")
+            )
+            
+            # Add properties from if block với context awareness
+            for prop in block['properties']:
+                prop_key = prop['key']
+                prop_value = prop['value']
+                prop_line = prop.get('line_number', 'N/A')
+                
+                display_text = f"{prop_key} = {prop_value}"
+                self.properties_tree.insert(
+                    condition_parent, "end",
+                    text=display_text,
+                    values=("Chimera", prop_key, prop_value),
+                    tags=("conditional_property", "if_block", f"context_{i}_if")
+                )
+            
+            # Add properties from else block if exists với context awareness
+            if block['else_properties']:
+                else_parent = self.properties_tree.insert(
+                    chimera_parent, "end",
+                    text="[else]",
+                    values=("Chimera", "[else]", "Else Context"),
+                    tags=("condition", "else_block", "conditional_context")
+                )
+                
+                for prop in block['else_properties']:
+                    prop_key = prop['key']
+                    prop_value = prop['value']
+                    prop_line = prop.get('line_number', 'N/A')
+                    
+                    display_text = f"{prop_key} = {prop_value}"
+                    self.properties_tree.insert(
+                        else_parent, "end",
+                        text=display_text,
+                        values=("Chimera", prop_key, prop_value),
+                        tags=("conditional_property", "else_block", f"context_{i}_else")
+                    )
+
+        # Add info about conditional structure for user awareness
+        info_parent = self.properties_tree.insert(
+            chimera_parent, "end",
+            text="ⓘ Conditional Structure Info",
+            values=("Chimera", "Info", "Click to see all contexts"),
+            tags=("info", "conditional_info")
+        )
+
+    def _populate_conditional_chimera_section(self, conditional_data):
+        """Populate Chimera section với conditional structure"""
+        chimera_parent = self.properties_tree.insert(
+            "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
+        )
+        
+        # Add conditional blocks
+        for i, block in enumerate(conditional_data['conditional_blocks']):
+            # Create condition header
+            condition_text = block['condition']
+            if condition_text.startswith('ifneq') or condition_text.startswith('ifdef') or condition_text.startswith('ifndef'):
+                condition_display = f"[{condition_text}]"
+            else:
+                condition_display = f"[{condition_text}]"
+                
+            condition_parent = self.properties_tree.insert(
+                chimera_parent, "end", 
+                text=condition_display,
+                values=("Chimera", condition_display, ""),
+                tags=("condition",)
+            )
+            
+            # Add properties from if block
+            for prop_key, prop_value in block['properties'].items():
+                display_value = prop_value
+                self.properties_tree.insert(
+                    condition_parent, "end",
+                    values=("Chimera", prop_key, display_value),
+                    tags=("conditional_property", "if_block")
+                )
+            
+            # Add properties from else block if exists
+            if block['else_properties']:
+                else_parent = self.properties_tree.insert(
+                    chimera_parent, "end",
+                    text="[else]",
+                    values=("Chimera", "[else]", ""),
+                    tags=("condition", "else_block")
+                )
+                
+                for prop_key, prop_value in block['else_properties'].items():
+                    display_value = prop_value
+                    self.properties_tree.insert(
+                        else_parent, "end",
+                        values=("Chimera", prop_key, display_value),
+                        tags=("conditional_property", "else_block")
+                    )
+
+    def _populate_flat_chimera_section(self, properties):
+        """Populate Chimera section theo cách flat (backward compatibility)"""
+        chimera_parent = self.properties_tree.insert(
+            "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
+        )
+        for prop, value in properties.items():
+            self.properties_tree.insert(
+                chimera_parent, "end", values=("Chimera", prop, value), tags=("property",)
+            )

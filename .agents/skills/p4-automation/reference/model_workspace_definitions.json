@@ -1,0 +1,90 @@
+{
+  "model_definitions": {
+    "A26X": {
+      "display_name": "A26X Series",
+      "system_workspaces": {
+        "REL": "TEMPLATE_D4_A26X-EUR-OPEN_ONEUI85_MR202601_SYSTEM_BBREL"
+      },
+      "vendor_workspaces": {
+        "REL": "TEMPLATE_D4_A26X-EUR-OPEN_ONEUI85_MR202601_TIGER_VENDOROSUP_BBREL"
+      },
+      "chipsets": {
+        "primary": "s5e8835",
+        "alternatives": ["EXYNOS", "a26x_sssi"],
+        "all": ["s5e8835", "EXYNOS", "a26x_sssi"]
+      },
+      "resources": {
+        "readahead": ["Resource 1", "Resource 2"]
+      }
+    },
+    "A54X": {
+      "display_name": "A54X Series",
+      "system_workspaces": {
+        "REL": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_MR202601_SYSTEM_BBREL",
+        "FLUMEN": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_FLUMEN_SYSTEM_BBREL",
+        "BENI": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_BENI_SYSTEM_BBREL"
+      },
+      "vendor_workspaces": {
+        "REL": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_MR202601_VENDOR_BBREL",
+        "FLUMEN": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_FLUMEN_VENDOR_BBREL",
+        "BENI": "TEMPLATE_D4_A54X-EUR-OPEN_ONEUI85_BENI_VENDOR_BBREL"
+      },
+      "chipsets": {
+        "primary": "a54x",
+        "alternatives": ["EXYNOS", "a26x_common"],
+        "all": ["a54x", "EXYNOS", "a26x_common"]
+      },
+      "resources": {
+        "readahead": ["Resource 1", "Resource 2"]
+      }
+    }
+  },
+  "branch_detection": {
+    "patterns": {
+      "REL": ["MR202601", "MR202702"],
+      "FLUMEN": ["FLUMEN"],
+      "BENI": []
+    },
+    "category_patterns": {
+      "System": "_SYSTEM_",
+      "Vendor": "_VENDOR_"
+    }
+  },
+  "mode_compatibility": {
+    "Tuning Properties": {
+      "required_branch_category": "Vendor",
+      "file_location": "device_common.mk",
+      "description": "Contains property values (beks, lmkd, etc.)"
+    },
+    "Readahead Libraries": {
+      "required_branch_category": "System",
+      "file_locations": [
+        "device_common.mk",
+        "Android.mk",
+        "rscmgr.rc"
+      ],
+      "description": "Manage readahead libraries in rscmgr files"
+    },
+    "LoadApkAsset": {
+      "required_branch_category": "System",
+      "file_location": "ReadaheadManager.java",
+      "description": "Manage Asset Apps for specific chipsets"
+    }
+  },
+  "automation_rules": {
+    "workspace_selection": {
+      "default_branch_type": "REL",
+      "branch_priority": ["REL", "FLUMEN", "BENI"]
+    },
+    "chipset_selection": {
+      "default_to_primary": true,
+      "fallback_to_alternatives": true
+    }
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "created_date": "2026-04-14",
+    "last_updated": "2026-04-14",
+    "description": "Model workspace and chipset definitions for P4 automation"
+  }
+}

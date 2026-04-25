@@ -422,6 +422,25 @@ def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original
                     if props:
                         log_callback(f"[DEBUG]   {category}: {len(props)} properties")
                 
+                from core.file_operations import extract_properties_from_file, validate_conditional_structure_match, enforce_structure_from_raw
+                
+                # Check for structure match before applying
+                local_props = extract_properties_from_file(local_path)
+                match, diffs = validate_conditional_structure_match(properties_to_apply, local_props)
+                
+                if not match:
+                    log_callback(f"[WARNING] Structure mismatch detected in {path_name}: {diffs}")
+                    log_callback(f"[INFO] Enforcing structure from source (higher branch)...")
+                    
+                    enf_success, enf_err = enforce_structure_from_raw(local_path, properties_to_apply)
+                    if not enf_success:
+                        log_callback(f"[ERROR] Failed to enforce structure: {enf_err}")
+                        if error_callback:
+                            error_callback("Apply Error", f"Failed to enforce structure in {path_name}: {enf_err}")
+                        return False
+                    else:
+                        log_callback(f"[OK] Source structure successfully enforced onto {path_name}.")
+                
                 success, error_msg = update_properties_in_file(local_path, properties_to_apply)
                 
                 if success:
