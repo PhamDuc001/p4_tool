@@ -540,7 +540,8 @@ def process_target_branch(branch_input, branch_name, vince_rscmgr_filename,
 
 
 def run_system_process(beni_input, vince_input, flumen_input, rel_input,
-                      log_callback, progress_callback=None, error_callback=None):
+                      log_callback, progress_callback=None, error_callback=None,
+                      continue_callback=None):
     """
     Execute complete system bringup process with integration cascading
     
@@ -685,13 +686,15 @@ def run_system_process(beni_input, vince_input, flumen_input, rel_input,
                         error_msg = f"Cannot find integration paths for {branch_name}"
                         log_callback(f"[ERROR] {error_msg}")
                         
-                        # Ask user if want to continue with remaining branches
-                        from tkinter import messagebox
-                        response = messagebox.askyesno(
-                            "Integration Failed",
-                            f"Cannot find integration history for {branch_name}.\n\n"
-                            f"Continue with remaining branches?",
-                        )
+                        if continue_callback:
+                            response = continue_callback(
+                                "Integration Failed",
+                                f"Cannot find integration history for {branch_name}.\n\n"
+                                f"Continue with remaining branches?",
+                            )
+                        else:
+                            log_callback("[INFO] No continue callback provided; stopping cascade")
+                            response = False
                         
                         if not response:
                             if error_callback:
@@ -719,12 +722,15 @@ def run_system_process(beni_input, vince_input, flumen_input, rel_input,
             except Exception as e:
                 log_callback(f"[ERROR] Failed to process {branch_name}: {str(e)}")
                 
-                from tkinter import messagebox
-                response = messagebox.askyesno(
-                    "Processing Error",
-                    f"Error processing {branch_name}: {str(e)}\n\n"
-                    f"Continue with remaining branches?",
-                )
+                if continue_callback:
+                    response = continue_callback(
+                        "Processing Error",
+                        f"Error processing {branch_name}: {str(e)}\n\n"
+                        f"Continue with remaining branches?",
+                    )
+                else:
+                    log_callback("[INFO] No continue callback provided; stopping after processing error")
+                    response = False
                 
                 if not response:
                     if error_callback:

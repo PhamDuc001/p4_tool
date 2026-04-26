@@ -5,6 +5,8 @@ Service layer for tuning-property workflows.
 from __future__ import annotations
 
 import copy
+import os
+import tempfile
 from collections.abc import Callable
 from typing import Any
 
@@ -30,6 +32,7 @@ from core.properties import (
 )
 
 from services.models import ConfirmationRequest, OperationResult, TuningLoadResult
+from services.preview import preview_text_change
 
 
 PropertyTree = dict[str, Any]
@@ -362,6 +365,7 @@ class TuningService:
         progress_callback: ProgressCallback | None = None,
         original_properties: PropertyTree | None = None,
         confirm_reopen_callback: ConfirmReopenCallback | None = None,
+        dry_run: bool = False,
     ) -> OperationResult:
         try:
             properties_to_apply = {
@@ -395,6 +399,26 @@ class TuningService:
             if original_properties:
                 description = self.generate_tuning_description(original_properties, current_properties)
                 self._log(log_callback, f"[DESCRIPTION] Generated changelist description: {description}")
+
+            if dry_run:
+                previews = self._preview_property_updates(resolved_depot_paths, properties_to_apply)
+                changed_files = [
+                    path_name
+                    for path_name, preview in previews.items()
+                    if preview.changed
+                ]
+                self._progress(progress_callback, 100)
+                self._log(log_callback, "[DRY-RUN] No changelist created and no files written.")
+                return OperationResult(
+                    success=True,
+                    message="Dry-run completed.",
+                    changed_files=changed_files,
+                    details={
+                        "resolved_depot_paths": resolved_depot_paths,
+                        "description": description,
+                        "previews": previews,
+                    },
+                )
 
             self._log(log_callback, "[STEP 1] Creating pending changelist for tuning changes...")
             changelist_id = self.create_changelist(description)
@@ -589,6 +613,48 @@ class TuningService:
         new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
         new_lines.append(f"\t{depot3}\t//{client_name}/{depot3[2:]}")
         self.p4_client.update_client_spec("\n".join(new_lines))
+
+    def _preview_property_updates(
+        self,
+        resolved_depot_paths: dict[str, str],
+        properties_to_apply: PropertyTree,
+    ):
+        previews = {}
+
+        for path_name, depot_path in resolved_depot_paths.items():
+            local_path = self.depot_to_local_path(depot_path)
+            with open(local_path, "r", encoding="utf-8") as file:
+                before = file.read()
+
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    suffix=".mk",
+                    delete=False,
+                ) as temp_file:
+                    temp_file.write(before)
+                    temp_path = temp_file.name
+
+                local_props = self.extract_properties(temp_path)
+                match, _ = self.validate_structure_match(properties_to_apply, local_props)
+                if not match:
+                    self.enforce_structure(temp_path, properties_to_apply)
+
+                success, error = self.update_properties(temp_path, properties_to_apply)
+                if not success:
+                    raise RuntimeError(error or f"Failed to preview {path_name}")
+
+                with open(temp_path, "r", encoding="utf-8") as temp_file:
+                    after = temp_file.read()
+
+                previews[path_name] = preview_text_change(local_path, before, after)
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+
+        return previews
 
     def _analyze_property_changes(
         self,

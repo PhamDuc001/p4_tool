@@ -267,14 +267,12 @@ def checkout_file_silent(
         if confirm_reopen_callback:
             response = confirm_reopen_callback(depot_path, current_cl, str(changelist_id))
         else:
-            confirm_title = "File Already Opened"
-            confirm_message = (
-                f"File is currently opened in changelist {current_cl}.\n\n"
-                f"Do you want to move it to changelist {changelist_id}?\n\n"
-                f"File: {depot_path}"
-            )
-            from tkinter import messagebox
-            response = messagebox.askyesno(confirm_title, confirm_message)
+            if log_callback:
+                log_callback(
+                    f"[INFO] No checkout confirmation callback provided; "
+                    f"keeping file in original CL {current_cl}"
+                )
+            response = False
         
         if response:
             # User chose Yes - reopen to new CL

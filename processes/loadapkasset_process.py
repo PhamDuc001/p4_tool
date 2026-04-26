@@ -8,7 +8,6 @@ Enhanced with dynamic changelist descriptions
 import os
 import re
 from typing import Dict, List, Optional, Tuple
-from tkinter import messagebox
 
 from core.p4_operations import (
     get_integration_source_depot_path,
@@ -345,7 +344,8 @@ def process_single_branch_loadapkasset(branch_name, workspace_or_path, chipset_n
 
 
 def run_loadapkasset_process(workspaces, chipset_name, selected_assets, changelist_id,
-                              log_callback, progress_callback=None, error_callback=None):
+                              log_callback, progress_callback=None, error_callback=None,
+                              continue_callback=None):
     """
     Execute LoadApkAsset process with integration cascading
     Cascades across REL → FLUMEN → BENI automatically
@@ -447,10 +447,15 @@ def run_loadapkasset_process(workspaces, chipset_name, selected_assets, changeli
                 if log_callback:
                     log_callback(f"[ERROR] Failed to process {branch}: {str(e)}")
                 
-                response = messagebox.askyesno(
-                    "Processing Error",
-                    f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
-                )
+                if continue_callback:
+                    response = continue_callback(
+                        "Processing Error",
+                        f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
+                    )
+                else:
+                    if log_callback:
+                        log_callback("[INFO] No continue callback provided; stopping after processing error")
+                    response = False
                 
                 if not response:
                     raise

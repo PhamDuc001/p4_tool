@@ -10,9 +10,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 from config.p4_config import get_client_name, get_workspace_root
-from processes.bringup_process import run_bringup_process
-from processes.system_process import run_system_process
 from core.p4_operations import auto_resolve_vendor_branches
+from services.bringup_service import BringupService
 
 
 class BringupTab:
@@ -24,6 +23,7 @@ class BringupTab:
         
         # Create the bringup frame
         self.frame = ttk.Frame(parent)
+        self.bringup_service = BringupService()
         
         # Initialize components
         self.create_content()
@@ -481,15 +481,17 @@ class BringupTab:
         def run_process_thread():
             try:
                 self.gui_utils.update_status("Processing: Running vendor bring up operation...")
-                run_bringup_process(
+                result = self.bringup_service.run_vendor(
                     beni_path,
                     vince_path,
                     flumen_path,
                     rel_path,
-                    self.log_callback,
-                    self.vendor_progress_callback,
-                    enhanced_error_callback,  # Use enhanced callback
+                    log_callback=self.log_callback,
+                    progress_callback=self.vendor_progress_callback,
+                    error_callback=enhanced_error_callback,
                 )
+                if not result.success:
+                    self.gui_utils.error_callback("Vendor Bringup Error", result.message)
             finally:
                 # Re-enable button when done
                 self.gui_utils.root.after(
@@ -531,15 +533,18 @@ class BringupTab:
         def run_process_thread():
             try:
                 self.gui_utils.update_status("Processing: Running FIXED system bring up with ALL auto-resolved targets...")
-                run_system_process(
+                result = self.bringup_service.run_system(
                     beni_input,
                     vince_input,
                     flumen_input,
                     rel_input,
-                    self.log_callback,
-                    self.system_progress_callback,
-                    self.gui_utils.error_callback,
+                    log_callback=self.log_callback,
+                    progress_callback=self.system_progress_callback,
+                    error_callback=self.gui_utils.error_callback,
+                    continue_callback=self._ask_yes_no_threadsafe,
                 )
+                if not result.success:
+                    self.gui_utils.error_callback("System Bringup Error", result.message)
             finally:
                 # Re-enable button when done
                 self.gui_utils.root.after(
@@ -553,3 +558,6 @@ class BringupTab:
         # Start the process in a separate thread
         thread = threading.Thread(target=run_process_thread, daemon=True)
         thread.start()
+
+    def _ask_yes_no_threadsafe(self, title, message):
+        return self.gui_utils.ask_yes_no_threadsafe(title, message)

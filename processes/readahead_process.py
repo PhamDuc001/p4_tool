@@ -9,8 +9,6 @@ NEW: Added dynamic changelist descriptions
 
 import os
 import re
-import tkinter as tk
-from tkinter import simpledialog, messagebox
 from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
     map_single_depot, sync_file_silent, checkout_file_silent,
@@ -150,7 +148,7 @@ def generate_readahead_description(resource1_libs, resource2_libs):
     return "Readahead some library"
 
 
-def prompt_for_rscmgr_filename(log_callback=None):
+def prompt_for_rscmgr_filename(log_callback=None, prompt_filename_callback=None):
     """
     Prompt user to input rscmgr filename when automatic detection fails
     
@@ -163,19 +161,18 @@ def prompt_for_rscmgr_filename(log_callback=None):
     if log_callback:
         log_callback("[PROMPT] Rscmgr filename not found automatically, prompting user...")
     
-    # Create a simple dialog to get user input
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-    root.attributes('-topmost', True)  # Bring dialog to front
-    
     try:
-        filename = simpledialog.askstring(
-            "Rscmgr Filename Required",
-            "Could not find rscmgr reference automatically.\n\n"
-            "Please enter the rscmgr filename (e.g., rscmgr.rc or rscmgr_vince.rc):",
-            initialvalue="rscmgr.rc",
-            parent=root
-        )
+        if prompt_filename_callback:
+            filename = prompt_filename_callback(
+                "Rscmgr Filename Required",
+                "Could not find rscmgr reference automatically.\n\n"
+                "Please enter the rscmgr filename (e.g., rscmgr.rc or rscmgr_vince.rc):",
+                "rscmgr.rc",
+            )
+        else:
+            if log_callback:
+                log_callback("[INFO] No filename prompt callback provided")
+            return None
         
         if filename:
             filename = filename.strip()
@@ -184,21 +181,13 @@ def prompt_for_rscmgr_filename(log_callback=None):
             if not filename.endswith('.rc'):
                 if log_callback:
                     log_callback(f"[ERROR] Invalid filename format: {filename} (must end with .rc)")
-                messagebox.showerror(
-                    "Invalid Filename",
-                    f"Filename must end with '.rc'\nGot: {filename}"
-                )
-                return prompt_for_rscmgr_filename(log_callback)  # Retry
+                return prompt_for_rscmgr_filename(log_callback, prompt_filename_callback)
             
             # Validate filename pattern (rscmgr*.rc)
             if not re.match(r'^rscmgr.*\.rc$', filename):
                 if log_callback:
                     log_callback(f"[ERROR] Invalid filename pattern: {filename} (should start with 'rscmgr')")
-                messagebox.showerror(
-                    "Invalid Filename", 
-                    f"Filename should start with 'rscmgr' and end with '.rc'\nGot: {filename}"
-                )
-                return prompt_for_rscmgr_filename(log_callback)  # Retry
+                return prompt_for_rscmgr_filename(log_callback, prompt_filename_callback)
             
             if log_callback:
                 log_callback(f"[OK] User provided rscmgr filename: {filename}")
@@ -212,10 +201,7 @@ def prompt_for_rscmgr_filename(log_callback=None):
     except Exception as e:
         if log_callback:
             log_callback(f"[ERROR] Failed to prompt for rscmgr filename: {str(e)}")
-        messagebox.showerror("Error", f"Failed to get input: {str(e)}")
         return None
-    finally:
-        root.destroy()
 
 
 def resolve_input_to_device_common_path(user_input, log_callback=None):
@@ -634,7 +620,8 @@ def process_target_workspace_enhanced(workspace_or_path, category, vince_rscmgr_
 
 
 def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist_id,
-                         log_callback, progress_callback=None, error_callback=None):
+                         log_callback, progress_callback=None, error_callback=None,
+                         prompt_filename_callback=None, continue_callback=None):
     """
     Execute readahead process with full integration history support
     Cascades across REL → FLUMEN → BENI automatically
@@ -694,7 +681,7 @@ def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist
         rscmgr_filename = find_rscmgr_filename_from_device_common(device_common_path, log_callback)
 
         if not rscmgr_filename:
-            rscmgr_filename = prompt_for_rscmgr_filename(log_callback)
+            rscmgr_filename = prompt_for_rscmgr_filename(log_callback, prompt_filename_callback)
             if not rscmgr_filename:
                 raise RuntimeError("rscmgr filename is required")
 
@@ -780,10 +767,15 @@ def run_readahead_process(workspaces, resource1_libs, resource2_libs, changelist
                 if log_callback:
                     log_callback(f"[ERROR] Failed to process {branch}: {str(e)}")
 
-                response = messagebox.askyesno(
-                    "Processing Error",
-                    f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
-                )
+                if continue_callback:
+                    response = continue_callback(
+                        "Processing Error",
+                        f"Error processing {branch}: {str(e)}\n\nContinue with remaining branches?",
+                    )
+                else:
+                    if log_callback:
+                        log_callback("[INFO] No continue callback provided; stopping after processing error")
+                    response = False
 
                 if not response:
                     raise

@@ -6,12 +6,7 @@ Handles the parse mode UI for workspace parsing and library size calculation
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-from processes.parse_process import (
-    parse_multiple_workspaces, 
-    refresh_adb_devices,
-    connect_to_device,
-    calculate_library_sizes
-)
+from services.parse_service import ParseService
 
 
 class ExportDialog:
@@ -136,6 +131,7 @@ class ParseTab:
         
         # Create the parse frame
         self.frame = ttk.Frame(parent)
+        self.parse_service = ParseService()
         
         # Parse mode data
         self.parse_results = {"BENI": [], "VINCE": [], "FLUMEN": []}
@@ -394,7 +390,7 @@ class ParseTab:
         # Clear library calculator
         self.library_input.delete("1.0", tk.END)
         self.on_clear_results()
-        self.connection_status.set("Not connected")
+        self.connection_status_var.set("Not connected")
         self.selected_device = None
 
         self.log_callback("[INFO] All parse fields and logs cleared.")
@@ -466,7 +462,7 @@ class ParseTab:
         """Handle refresh devices button click"""
         try:
             self.log_callback("[ADB] Refreshing device list...")
-            devices = refresh_adb_devices(self.log_callback)
+            devices = self.parse_service.refresh_adb_devices(self.log_callback)
             
             self.connected_devices = devices
             self.device_combo['values'] = devices
@@ -493,7 +489,7 @@ class ParseTab:
         try:
             self.log_callback(f"[ADB] Connecting to device: {selected}")
             
-            success = connect_to_device(selected, self.log_callback)
+            success = self.parse_service.connect_to_device(selected, self.log_callback)
             
             if success:
                 self.selected_device = selected
@@ -544,7 +540,7 @@ class ParseTab:
                 self.gui_utils.update_status(f"Calculating sizes for {total_libraries} libraries...")
                 
                 # Use logic from parse_process
-                results = calculate_library_sizes(
+                results = self.parse_service.calculate_library_sizes(
                     self.selected_device, 
                     libraries, 
                     self.log_callback,
@@ -708,7 +704,7 @@ class ParseTab:
                 )
 
                 # Run the parsing process
-                results = parse_multiple_workspaces(
+                results = self.parse_service.parse_multiple_workspaces(
                     workspace_dict,
                     self.log_callback,
                     self.progress_callback,

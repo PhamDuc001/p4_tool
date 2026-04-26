@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.p4_config import p4_env_is_configured
 from config.settings import load_settings, save_settings
+from config.version import __version__
 from core.p4_client import get_default_p4_client
 from gui.main_gui import create_gui
 
@@ -45,7 +46,7 @@ def config_p4():
 
 def main():
     try:
-        print("Starting P4 Tool...")
+        print(f"Starting P4 Tool {__version__}...")
         if check_p4_config():
             config_p4()
         create_gui()

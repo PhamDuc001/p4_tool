@@ -6,7 +6,7 @@ Handles the readahead mode UI for workspace processing and library modification
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-from processes.readahead_process import run_readahead_process
+from services.readahead_service import ReadaheadService
 
 
 class ReadaheadTab:
@@ -18,6 +18,7 @@ class ReadaheadTab:
 
         # Create the readahead frame
         self.frame = ttk.Frame(parent)
+        self.readahead_service = ReadaheadService()
 
         # Initialize components
         self.create_content()
@@ -291,11 +292,6 @@ class ReadaheadTab:
 
     def _parse_rscmgr_paths_logic(self, workspaces):
         """Parse rscmgr paths logic - simple validation only"""
-        from processes.readahead_process import (
-            find_rscmgr_filename_from_device_common,
-            find_rscmgr_file_path,
-            prompt_for_rscmgr_filename,
-        )
         from core.p4_operations import (
             map_single_depot,
             sync_file_silent,
@@ -340,16 +336,15 @@ class ReadaheadTab:
             sync_file_silent(device_common_path)
 
             # Find rscmgr filename
-            rscmgr_filename = find_rscmgr_filename_from_device_common(
-                device_common_path, self.log_callback
+            rscmgr_filename = self.readahead_service.find_rscmgr_filename_from_device_common(
+                device_common_path,
+                log_callback=self.log_callback,
             )
             
             if not rscmgr_filename:
                 self.log_callback("[PARSE] No rscmgr filename found, prompting user...")
                 # Prompt user - need to run in main thread
-                self.gui_utils.root.after(
-                    0, lambda: self._prompt_and_continue_parse(workspaces)
-                )
+                self.gui_utils.root.after(0, lambda: self._prompt_and_continue_parse(workspaces))
                 return
 
             self.log_callback(f"[PARSE] Found rscmgr filename: {rscmgr_filename}")
@@ -368,7 +363,6 @@ class ReadaheadTab:
 
     def _find_and_validate_paths(self, workspaces, rscmgr_filename):
         """Find and validate rscmgr paths for all provided workspaces"""
-        from processes.readahead_process import find_rscmgr_file_path
         from core.p4_operations import validate_depot_path
 
         for workspace_key in ["REL", "FLUMEN", "BENI"]:
@@ -381,8 +375,10 @@ class ReadaheadTab:
             )
 
             # Find rscmgr path
-            rscmgr_path = find_rscmgr_file_path(
-                workspace, rscmgr_filename, self.log_callback
+            rscmgr_path = self.readahead_service.find_rscmgr_file_path(
+                workspace,
+                rscmgr_filename,
+                log_callback=self.log_callback,
             )
 
             if not rscmgr_path:
@@ -409,9 +405,10 @@ class ReadaheadTab:
 
     def _prompt_and_continue_parse(self, workspaces):
         """Prompt for rscmgr filename and continue parse"""
-        from processes.readahead_process import prompt_for_rscmgr_filename
-
-        rscmgr_filename = prompt_for_rscmgr_filename(self.log_callback)
+        rscmgr_filename = self.readahead_service.prompt_for_rscmgr_filename(
+            log_callback=self.log_callback,
+            prompt_filename_callback=self._prompt_filename_threadsafe,
+        )
         
         if not rscmgr_filename:
             self.log_callback("[PARSE] Cancelled - rscmgr filename required")
@@ -439,9 +436,10 @@ class ReadaheadTab:
 
     def _prompt_rscmgr_filename_async(self, workspaces):
         """Handle rscmgr filename prompt in main thread"""
-        from processes.readahead_process import prompt_for_rscmgr_filename
-        
-        rscmgr_filename = prompt_for_rscmgr_filename(self.log_callback)
+        rscmgr_filename = self.readahead_service.prompt_for_rscmgr_filename(
+            log_callback=self.log_callback,
+            prompt_filename_callback=self._prompt_filename_threadsafe,
+        )
         if rscmgr_filename:
             # Continue parsing with user-provided filename
             def continue_parse():
@@ -460,11 +458,6 @@ class ReadaheadTab:
 
     def _parse_with_filename(self, workspaces, rscmgr_filename):
         """Continue parsing with user-provided rscmgr filename"""
-        from processes.readahead_process import (
-            find_rscmgr_file_path,
-            auto_resolve_missing_branches_readahead,
-        )
-
         try:
             self.log_callback(f"[PARSE] Using rscmgr filename: {rscmgr_filename}")
 
@@ -474,7 +467,11 @@ class ReadaheadTab:
                 workspace = workspaces.get(workspace_key, "").strip()
                 if workspace:
                     self.log_callback(f"[PARSE] Finding rscmgr path for {workspace_key}: {workspace}")
-                    rscmgr_path = find_rscmgr_file_path(workspace, rscmgr_filename, self.log_callback)
+                    rscmgr_path = self.readahead_service.find_rscmgr_file_path(
+                        workspace,
+                        rscmgr_filename,
+                        log_callback=self.log_callback,
+                    )
                     if rscmgr_path:
                         rscmgr_paths[workspace_key] = rscmgr_path
                         self.log_callback(f"[PARSE] Found {workspace_key} rscmgr: {rscmgr_path}")
@@ -492,8 +489,10 @@ class ReadaheadTab:
                     else:
                         resolve_workspaces[key] = ""
 
-                resolved_workspaces = auto_resolve_missing_branches_readahead(
-                    resolve_workspaces, rscmgr_filename, self.log_callback
+                resolved_workspaces = self.readahead_service.auto_resolve_missing_branches(
+                    resolve_workspaces,
+                    rscmgr_filename,
+                    log_callback=self.log_callback,
                 )
 
                 # Update UI with resolved paths
@@ -599,16 +598,19 @@ class ReadaheadTab:
             try:
                 self.gui_utils.update_status("Processing: Running readahead process...")
 
-                # Run the readahead process
-                run_readahead_process(
+                result = self.readahead_service.run(
                     inputs["workspaces"],
                     inputs["resource1_libs"],
                     inputs["resource2_libs"],
                     inputs["changelist_id"],
-                    self.log_callback,
-                    self.progress_callback,
-                    self.gui_utils.error_callback,
+                    log_callback=self.log_callback,
+                    progress_callback=self.progress_callback,
+                    error_callback=self.gui_utils.error_callback,
+                    prompt_filename_callback=self._prompt_filename_threadsafe,
+                    continue_callback=self._ask_yes_no_threadsafe,
                 )
+                if not result.success:
+                    self.gui_utils.error_callback("Readahead Error", result.message)
 
                 self.gui_utils.root.after(
                     0,
@@ -635,3 +637,9 @@ class ReadaheadTab:
         # Start process in separate thread
         thread = threading.Thread(target=readahead_thread, daemon=True)
         thread.start()
+
+    def _ask_yes_no_threadsafe(self, title, message):
+        return self.gui_utils.ask_yes_no_threadsafe(title, message)
+
+    def _prompt_filename_threadsafe(self, title, message, initial_value):
+        return self.gui_utils.ask_string_threadsafe(title, message, initial_value)

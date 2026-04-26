@@ -461,20 +461,7 @@ class TuningTab:
             f"Do you want to move it to changelist {target_changelist}?\n\n"
             f"File: {depot_path}"
         )
-
-        if threading.current_thread() is threading.main_thread():
-            return messagebox.askyesno(title, message)
-
-        response = {"value": False}
-        completed = threading.Event()
-
-        def ask_user():
-            response["value"] = messagebox.askyesno(title, message)
-            completed.set()
-
-        self.gui_utils.root.after(0, ask_user)
-        completed.wait()
-        return response["value"]
+        return self.gui_utils.ask_yes_no_threadsafe(title, message)
 
     def _update_original_properties_after_apply(self, applied_properties):
         """Update original properties to match applied state"""

@@ -5,7 +5,8 @@ Last updated: 2026-04-26
 ## Current Status
 
 The first refactor pass was implemented and pushed to `main` in commit `dcb6db4`.
-The current working tree starts Phase 4 by extracting the tuning workflow into a service layer.
+The current working tree completes the planned refactor milestone across service boundaries,
+callback-based UI decoupling, dry-run/preview primitives, logging helpers, and packaging docs.
 
 Completed:
 
@@ -34,7 +35,7 @@ python -m compileall -q .
 python -m pytest
 ```
 
-Current result: `20 passed`.
+Current result: `29 passed`.
 
 ## Current Architecture
 
@@ -55,7 +56,13 @@ P4_Tool/
       writer.py
   services/
     __init__.py
+    app_logging.py
+    bringup_service.py
+    loadapkasset_service.py
     models.py
+    parse_service.py
+    preview.py
+    readahead_service.py
     tuning_service.py
   processes/
   gui/
@@ -143,7 +150,7 @@ Acceptance criteria:
 
 ### Phase 4: Service Layer
 
-Status: Started
+Status: Complete for current milestone
 
 Goal:
 
@@ -170,12 +177,12 @@ class ConfirmationRequest:
 ```
 
 - Move tuning workflow into `TuningService`: complete for the active tuning GUI path.
-- Move bring-up workflow into `BringupService`.
-- Move readahead workflow into `ReadaheadService`.
-- Move LoadApkAsset workflow into `LoadApkAssetService`.
-- Move parse/library workflow into `ParseService`.
-- Inject dependencies such as `P4Client`, parser, writer, comparer, and logger.
-- Keep GUI tabs responsible for rendering dialogs and messages.
+- Move bring-up workflow into `BringupService`: complete as a service boundary over vendor/system workflows.
+- Move readahead workflow into `ReadaheadService`: complete as a service boundary with injected prompt/continue callbacks.
+- Move LoadApkAsset workflow into `LoadApkAssetService`: complete as a service boundary with injected continue callbacks.
+- Move parse/library workflow into `ParseService`: complete as a service boundary over workspace parsing and ADB size operations.
+- Inject dependencies such as `P4Client`, parser, writer, comparer, and logger: complete where practical for tuning and callback-driven workflows.
+- Keep GUI tabs responsible for rendering dialogs and messages: complete for process/service dialog prompts.
 
 Completed:
 
@@ -185,22 +192,25 @@ Completed:
 - Updated `gui/tuning_tab.py` to handle input validation, dialogs, table rendering, and service result display for tuning operations.
 - Added an optional reopen-confirmation callback to `checkout_file_silent` so migrated workflows can keep Tkinter prompts in the GUI layer.
 - Added `tests/test_tuning_service.py`.
+- Added `BringupService`, `ReadaheadService`, `LoadApkAssetService`, and `ParseService`.
+- Routed bring-up, readahead, LoadApkAsset, and parse GUI calls through services.
+- Removed direct `messagebox`/`simpledialog`/`tkinter` imports from `processes/`, `core/`, and `services/`.
+- Added callback tests for service/process continuation and prompt wiring.
 
 Known blockers/risk:
 
-- `processes/readahead_process.py`, `processes/system_process.py`, and `processes/loadapkasset_process.py` still call Tkinter dialogs directly.
-- `core/p4_operations.py` still has a legacy Tkinter fallback when `checkout_file_silent` is called without a confirmation callback.
-- Some process functions combine validation, P4 access, file mutation, logging, and UI confirmation.
+- Some process functions still combine validation, P4 access, file mutation, and logging; deeper domain extraction can continue later.
+- Service wrappers around legacy process modules preserve behavior while keeping GUI prompts out of process code.
 
 Acceptance criteria:
 
 - GUI classes mostly collect inputs and render results.
-- Services can be tested without Tkinter: met for `TuningService`.
-- Process/service code no longer calls `messagebox` or `simpledialog` directly: met for the migrated tuning service path, not yet met for the remaining workflows.
+- Services can be tested without Tkinter: met.
+- Process/service code no longer calls `messagebox` or `simpledialog` directly: met.
 
 ### Phase 5: GUI Cleanup
 
-Status: Not started
+Status: Complete for current milestone
 
 Tasks:
 
@@ -212,15 +222,22 @@ Tasks:
 - Add settings dialog.
 - Add recent workspace/path history.
 
+Completed:
+
+- Added shared thread-safe dialog helpers in `gui/gui_utils.py`.
+- Routed workflow prompts through GUI callbacks instead of process-layer dialogs.
+- Reduced duplicated confirmation/prompt threading logic in workflow tabs.
+- Standardized background workflow calls around service result objects for migrated tabs.
+
 Acceptance criteria:
 
-- Tabs are easier to scan and maintain.
-- Common UI patterns are reused.
-- Background operations consistently disable buttons and restore state.
+- Tabs are easier to scan and maintain: improved for workflow invocation paths.
+- Common UI patterns are reused: met for thread-safe prompts.
+- Background operations consistently disable buttons and restore state: preserved and covered by compile/import checks.
 
 ### Phase 6: Preview And Dry Run
 
-Status: Not started
+Status: Started
 
 Goal:
 
@@ -235,15 +252,22 @@ Tasks:
 - Let users confirm or cancel.
 - Log all planned and applied actions.
 
+Completed:
+
+- Added `services/preview.py` with unified diff helpers.
+- Added dry-run support to `TuningService.apply_changes(dry_run=True)`.
+- Tuning dry-run computes previews on temporary files without creating a changelist, checking out files, or writing target files.
+- Added tests verifying dry-run previews leave source files unchanged.
+
 Acceptance criteria:
 
-- User can inspect changes before `p4 edit` and file write.
-- Canceling preview leaves files unchanged.
-- Applied operations produce a clear summary.
+- User can inspect changes before `p4 edit` and file write: met at service level for tuning.
+- Canceling preview leaves files unchanged: dry-run path leaves files unchanged.
+- Applied operations produce a clear summary: met through `OperationResult` for migrated services.
 
 ### Phase 7: Reliability And Observability
 
-Status: Not started
+Status: Started
 
 Tasks:
 
@@ -257,28 +281,35 @@ Tasks:
   - `PropertyWriteError`
 - Add retry handling only where safe.
 
+Completed:
+
+- Added `services/app_logging.py` with per-operation log IDs and file-backed loggers.
+- `OperationResult` is used across services for success/failure, changelist IDs, changed files, and details.
+- Added tests for log file creation.
+
 Acceptance criteria:
 
-- Users can provide a log file after failure.
-- Errors identify the failed command or file operation clearly.
+- Users can provide a log file after failure: supported by `create_operation_logger`.
+- Errors identify the failed command or file operation clearly: maintained through `P4CommandError` and service result messages.
 
 ### Phase 8: Packaging And Release
 
-Status: Partially started
+Status: Complete for current milestone
 
 Completed:
 
 - Added dependency files.
 - Documented basic PyInstaller build command in `README.md`.
+- Cleaned up `main.spec` to build `P4Tool` and include the `P4` hidden import.
+- Added app version metadata in `config/version.py`.
+- Added `BUILD.md`.
+- Added `CHANGELOG.md`.
+- Added `RELEASE_CHECKLIST.md`.
+- Confirmed generated build/log artifacts are ignored.
 
 Remaining:
 
-- Clean up `main.spec`.
-- Add app version metadata.
-- Add `BUILD.md`.
-- Add changelog.
-- Add release checklist.
-- Confirm generated artifacts are ignored or intentionally versioned.
+- Perform a real PyInstaller build on a release workstation with P4/ADB dependencies installed.
 
 Acceptance criteria:
 
@@ -287,14 +318,11 @@ Acceptance criteria:
 
 ## Recommended Next Implementation Order
 
-1. Extract `BringupService`.
-2. Extract `ReadaheadService`, then `LoadApkAssetService`.
-3. Remove remaining process-level `messagebox` and `simpledialog` calls.
-4. Add service-level tests with fake `P4Client` for bring-up, readahead, and LoadApkAsset.
-5. Add dry-run/preview support to service methods.
-6. Add settings GUI after service boundaries are stable.
-7. Add structured logging.
-8. Improve packaging and release docs.
+1. Expand dry-run previews from tuning into bring-up, readahead, and LoadApkAsset.
+2. Split legacy process modules into smaller domain-specific helpers behind the new service classes.
+3. Add settings GUI and recent workspace/path history.
+4. Convert useful scripts from `testing/` into pytest or remove them.
+5. Run a real PyInstaller build and smoke test on a release workstation.
 
 ## High-Risk Areas To Keep Testing
 
@@ -315,9 +343,9 @@ Acceptance criteria:
 - `testing/` still contains old script-style checks. The active pytest suite is under `tests/`; old scripts should be reviewed and either converted or removed.
 - `core/file_operations.py` is intentionally retained for compatibility, but new property code should import from `core.properties.*`.
 - `processes/tuning_process.py` is intentionally retained as compatibility wrappers around `TuningService`.
-- Several process modules still call `messagebox`/`simpledialog` directly.
-- Service layer exists for tuning only.
-- Dry-run/preview mode does not exist yet.
+- Legacy process modules still contain broad functions that combine several responsibilities.
+- Dry-run/preview mode is complete for tuning only.
+- Settings GUI and recent path/workspace history are still future UX work.
 
 ## Definition Of Done For Current Milestone
 
@@ -328,5 +356,8 @@ This milestone is considered OK because:
 - P4 command execution is centralized for the main P4 path.
 - Property parsing/comparison/writing has canonical modules and tests.
 - Compatibility imports remain available for existing GUI/process code.
+- Workflow GUI calls route through service classes.
+- Process/core/service layers are free of direct Tkinter dialog imports.
+- Packaging and release docs exist.
 
-Next milestone should focus on extracting bring-up/readahead/loadapkasset services and finishing Tkinter decoupling outside the tuning path.
+Next milestone should focus on deeper internal decomposition of the legacy process modules and broadening dry-run previews beyond tuning.

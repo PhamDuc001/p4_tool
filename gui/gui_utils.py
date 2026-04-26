@@ -4,7 +4,8 @@ Handles thread-safe GUI operations, logging, and error dialogs
 """
 
 import tkinter as tk
-from tkinter import messagebox
+import threading
+from tkinter import messagebox, simpledialog
 
 
 class GUIUtils:
@@ -48,6 +49,48 @@ class GUIUtils:
         def show_info():
             messagebox.showinfo(title, message)
         self.root.after(0, show_info)
+
+    def ask_yes_no_threadsafe(self, title, message):
+        """Return a yes/no answer, safely marshaling to the Tk thread when needed."""
+        if threading.current_thread() is threading.main_thread():
+            return messagebox.askyesno(title, message)
+
+        result = {"value": False}
+        completed = threading.Event()
+
+        def ask():
+            result["value"] = messagebox.askyesno(title, message)
+            completed.set()
+
+        self.root.after(0, ask)
+        completed.wait()
+        return result["value"]
+
+    def ask_string_threadsafe(self, title, message, initialvalue=""):
+        """Return a string prompt answer, safely marshaling to the Tk thread when needed."""
+        if threading.current_thread() is threading.main_thread():
+            return simpledialog.askstring(
+                title,
+                message,
+                initialvalue=initialvalue,
+                parent=self.root,
+            )
+
+        result = {"value": None}
+        completed = threading.Event()
+
+        def ask():
+            result["value"] = simpledialog.askstring(
+                title,
+                message,
+                initialvalue=initialvalue,
+                parent=self.root,
+            )
+            completed.set()
+
+        self.root.after(0, ask)
+        completed.wait()
+        return result["value"]
 
     def update_status(self, message):
         """Update status bar message"""

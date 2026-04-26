@@ -120,3 +120,37 @@ def test_apply_changes_returns_operation_result_and_passes_confirm_callback():
     assert result.changed_files == ["BENI"]
     assert checkout_calls[0][0] == "//depot/beni/device_common.mk"
     assert update_calls[0][0] == "C:/ws/device_common.mk"
+
+
+def test_apply_changes_supports_dry_run_with_previews(tmp_path):
+    target = tmp_path / "device_common.mk"
+    target.write_text(
+        """# LMKD property
+PRODUCT_PROPERTY_OVERRIDES += \\
+    ro.slmk.plg_key=1
+""",
+        encoding="utf-8",
+    )
+
+    service = TuningService(
+        map_single_depot_fn=lambda depot: None,
+        sync_file_fn=lambda depot: None,
+        depot_to_local_path_fn=lambda depot: str(target),
+        extract_properties_fn=lambda local_path: sample_properties(value="1"),
+        validate_structure_match_fn=lambda first, second: (True, []),
+    )
+
+    result = service.apply_changes(
+        sample_properties(value="2"),
+        {"BENI": "//depot/beni/device_common.mk"},
+        log_callback=lambda message: None,
+        original_properties=sample_properties(value="1"),
+        dry_run=True,
+    )
+
+    assert result.success is True
+    assert result.changelist_id is None
+    assert result.changed_files == ["BENI"]
+    assert "previews" in result.details
+    assert result.details["previews"]["BENI"].changed is True
+    assert target.read_text(encoding="utf-8").count("ro.slmk.plg_key=1") == 1

@@ -6,18 +6,12 @@ Handles the UI for adding asset apps to chipsets in ReadaheadManager.java
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-from processes.loadapkasset_process import (
-    run_loadapkasset_process,
-    find_samsung_vendor_path,
-    construct_readahead_manager_path,
-    parse_readahead_manager_file,
-    AVAILABLE_ASSETS
-)
 from core.p4_operations import (
     map_single_depot,
     sync_file_silent,
     validate_depot_path,
 )
+from services.loadapkasset_service import LoadApkAssetService
 
 
 class LoadApkAssetTab:
@@ -29,6 +23,7 @@ class LoadApkAssetTab:
 
         # Create the frame
         self.frame = ttk.Frame(parent)
+        self.loadapkasset_service = LoadApkAssetService()
 
         # Store chipset data
         self.chipset_data = {}  # {chipset_name: [list of current assets]}
@@ -113,7 +108,7 @@ class LoadApkAssetTab:
         asset_scroll.pack(side="right", fill="y")
 
         # Populate with all available assets initially
-        for asset in AVAILABLE_ASSETS:
+        for asset in self.loadapkasset_service.available_assets:
             self.asset_listbox.insert(tk.END, asset)
 
         # Start button
@@ -244,7 +239,7 @@ class LoadApkAssetTab:
         # Reset asset selection
         self.asset_listbox.selection_clear(0, tk.END)
         self.asset_listbox.delete(0, tk.END)
-        for asset in AVAILABLE_ASSETS:
+        for asset in self.loadapkasset_service.available_assets:
             self.asset_listbox.insert(tk.END, asset)
 
         # Clear stored data
@@ -359,7 +354,7 @@ class LoadApkAssetTab:
             self.progress_callback(20)
 
             # Find samsung vendor path
-            samsung_path = find_samsung_vendor_path(primary_workspace, self.log_callback)
+            samsung_path = self.loadapkasset_service.find_samsung_vendor_path(primary_workspace, self.log_callback)
             if not samsung_path:
                 raise RuntimeError(f"Cannot find samsung vendor path in {workspace_type}")
 
@@ -367,7 +362,7 @@ class LoadApkAssetTab:
             self.progress_callback(30)
 
             # Construct ReadaheadManager.java path
-            readahead_mgr_path = construct_readahead_manager_path(samsung_path)
+            readahead_mgr_path = self.loadapkasset_service.construct_readahead_manager_path(samsung_path)
             self.log_callback(f"[PARSE] Constructed path: {readahead_mgr_path}")
             
             # Validate path exists
@@ -393,7 +388,7 @@ class LoadApkAssetTab:
 
             # Parse file to get chipset data
             self.log_callback("[PARSE] Parsing chipset data from ReadaheadManager.java...")
-            chipset_data = parse_readahead_manager_file(readahead_mgr_path, self.log_callback)
+            chipset_data = self.loadapkasset_service.parse_readahead_manager_file(readahead_mgr_path, self.log_callback)
 
             self.progress_callback(80)
 
@@ -486,7 +481,11 @@ class LoadApkAssetTab:
 
         # Update asset listbox - remove already existing assets
         self.asset_listbox.delete(0, tk.END)
-        available_to_add = [asset for asset in AVAILABLE_ASSETS if asset not in current_assets]
+        available_to_add = [
+            asset
+            for asset in self.loadapkasset_service.available_assets
+            if asset not in current_assets
+        ]
         
         for asset in available_to_add:
             self.asset_listbox.insert(tk.END, asset)
@@ -562,16 +561,18 @@ class LoadApkAssetTab:
             try:
                 self.gui_utils.update_status("Processing: Running LoadApkAsset process...")
 
-                # Run the LoadApkAsset process
-                run_loadapkasset_process(
+                result = self.loadapkasset_service.run(
                     inputs["workspaces"],
                     inputs["chipset_name"],
                     inputs["selected_assets"],
                     inputs["changelist_id"],
-                    self.log_callback,
-                    self.progress_callback,
-                    self.gui_utils.error_callback,
+                    log_callback=self.log_callback,
+                    progress_callback=self.progress_callback,
+                    error_callback=self.gui_utils.error_callback,
+                    continue_callback=self._ask_yes_no_threadsafe,
                 )
+                if not result.success:
+                    self.gui_utils.error_callback("LoadApkAsset Error", result.message)
 
                 self.gui_utils.root.after(
                     0,
@@ -596,3 +597,6 @@ class LoadApkAssetTab:
         # Start process in separate thread
         thread = threading.Thread(target=loadapkasset_thread, daemon=True)
         thread.start()
+
+    def _ask_yes_no_threadsafe(self, title, message):
+        return self.gui_utils.ask_yes_no_threadsafe(title, message)
