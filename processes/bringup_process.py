@@ -11,9 +11,10 @@ from core.p4_operations import (
     find_device_common_mk_path
 )
 from core.file_operations import (
-    validate_properties_exist, update_lmkd_chimera,
-    compare_properties_between_files
+    validate_properties_exist, update_lmkd_chimera
 )
+from core.properties.comparer import compare_properties_between_files
+from core.properties.parser import extract_properties_from_file
 from config.p4_config import depot_to_local_path
 
 def map_client_four_paths(beni_depot, vince_depot, flumen_depot, rel_depot, log_callback):
@@ -72,7 +73,11 @@ def compare_target_with_vince(vince_local_path, target_local_path, target_name, 
     log_callback(f"[COMPARE] Comparing {target_name} properties with VINCE...")
     
     try:
-        differences = compare_properties_between_files(vince_local_path, target_local_path)
+        differences = compare_properties_between_files(
+            vince_local_path,
+            target_local_path,
+            extract_properties_from_file,
+        )
         
         if differences is None:
             log_callback(f"[ERROR] Failed to compare properties between VINCE and {target_name}")

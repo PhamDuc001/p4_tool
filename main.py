@@ -1,61 +1,53 @@
 """
-Main entry point for the Tuning Tool application
+Main entry point for the P4 Tool application.
 """
-import sys
+
+from __future__ import annotations
+
 import os
-from P4 import P4, P4Exception
-import subprocess
-# Add the current directory to Python path to enable relative imports
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from config.p4_config import p4_env_is_configured
+from config.settings import load_settings, save_settings
+from core.p4_client import get_default_p4_client
 from gui.main_gui import create_gui
 
+
 def check_p4_config():
-    try:
-        result = subprocess.run("p4 set", capture_output=True, text=True, shell=True)
-        output_lines = result.stdout.strip().split('\n')
-        # print(output_lines)
-        if len(output_lines) == 1 and output_lines[0] == "P4EDITOR=C:\\Windows\\system32\\Notepad.exe (set)":
-            # print("P4 is not configured. Please configure it manually.")
-            return True
-        # print("P4 is configured.")
-        return False
-    except Exception:
-        return False
-    
+    return not p4_env_is_configured()
+
+
 def config_p4():
-    try:
-        # Get username
-        username = os.getenv('USERNAME') or os.getenv('USER')
+    username = os.getenv("USERNAME") or os.getenv("USER")
+    if not username:
+        raise RuntimeError("Unable to determine current username for P4 configuration")
 
-        # Config P4USER
-        subprocess.run(f"p4 set P4USER={username}", shell=True, check=True)
+    client = get_default_p4_client()
+    settings = load_settings()
 
-        # Get workspace name
-        clients_cmd = f"p4 -p 107.113.53.156:1716 -u {username} clients -u {username}"
-        result = subprocess.run(clients_cmd, capture_output=True, text=True, shell=True)
-        client_lines = result.stdout.splitlines()
-        first_client = client_lines[0].split()
-        workspace_name = first_client[1]
+    client.set_variable("P4USER", username)
+    settings.p4user = username
 
-        # Config P4CLIENT
-        subprocess.run(f"p4 set P4CLIENT={workspace_name}", shell=True, check=True)
+    clients_output = client.list_clients_for_user(username, port=settings.p4port)
+    client_lines = [line for line in clients_output.splitlines() if line.strip()]
+    if not client_lines:
+        raise RuntimeError(f"No P4 clients found for user {username}")
 
-        # Config P4PORT
-        subprocess.run("p4 set P4PORT=107.113.53.156:1716", shell=True, check=True)
-    except Exception as e:
-        print(e)
+    workspace_name = client_lines[0].split()[1]
+    client.set_variable("P4CLIENT", workspace_name)
+    client.set_variable("P4PORT", settings.p4port)
+
+    settings.p4client = workspace_name
+    save_settings(settings)
 
 
 def main():
-    """Main function to start the application"""
     try:
-        print("Starting Tuning Tool...")
-
+        print("Starting P4 Tool...")
         if check_p4_config():
             config_p4()
-            
-        # Start GUI
         create_gui()
     except KeyboardInterrupt:
         print("\nApplication interrupted by user")
@@ -63,7 +55,6 @@ def main():
         print(f"Fatal error: {e}")
         sys.exit(1)
 
+
 if __name__ == "__main__":
     main()
-
-   

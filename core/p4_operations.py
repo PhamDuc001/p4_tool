@@ -4,11 +4,11 @@ Handles all Perforce commands and validations
 Enhanced with auto-resolve cascading functionality - FIXED VERSION
 """
 
-import subprocess
 import re
+import shlex
 from typing import List, Optional, Tuple
 from config.p4_config import get_client_name
-from P4 import P4, P4Exception
+from core.p4_client import get_default_p4_client
 
 # Export the function for use by other modules
 __all__ = [
@@ -38,14 +38,8 @@ def find_device_common_mk_path(workspace_name, log_callback=None):
     if log_callback:
         log_callback(f"[SYSTEM] Searching device_common.mk in workspace: {workspace_name}")
     
-    p4 = P4()
-    P4_SERVER_PORT = "107.113.53.156:1716"
-    p4.port = P4_SERVER_PORT
     try:
-        p4.connect()
-        
-        # Get client spec information
-        client_spec = p4.fetch_client(workspace_name)
+        client_spec = get_default_p4_client().fetch_client_spec(workspace_name)
         
         # Search in View mappings for device_common.mk pattern
         device_common_paths = []
@@ -71,37 +65,35 @@ def find_device_common_mk_path(workspace_name, log_callback=None):
         
         return device_common_paths[0] if device_common_paths else None, all_view_paths
         
-    except P4Exception as e:
+    except Exception as e:
         error_msg = f"P4 Error: {str(e)}"
         if log_callback:
             log_callback(f"[ERROR] {error_msg}")
         raise RuntimeError(error_msg)
-    finally:
-        try:
-            p4.disconnect()
-        except:
-            pass
 
 def run_cmd(cmd, input_text=None):
     """Execute command and return output"""
-    result = subprocess.run(
-        cmd, input=input_text, capture_output=True, text=True, shell=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}\n{result.stderr}")
-    return result.stdout.strip()
+    args = _parse_p4_command(cmd)
+    return get_default_p4_client().run(args, input_text=input_text)
+
+
+def _parse_p4_command(cmd):
+    if isinstance(cmd, (list, tuple)):
+        parts = list(cmd)
+    else:
+        parts = shlex.split(cmd, posix=False)
+    if not parts:
+        raise ValueError("P4 command cannot be empty")
+    if parts[0].lower() == "p4":
+        parts = parts[1:]
+    return parts
 
 
 def validate_depot_path(depot_path):
     """Validate if depot path exists in Perforce"""
     try:
-        result = subprocess.run(
-            f"p4 files {depot_path}", capture_output=True, text=True, shell=True
-        )
-        if result.returncode != 0 or "no such file" in result.stderr.lower():
-            return False
-        return True
-    except:
+        return get_default_p4_client().files(depot_path)
+    except Exception:
         return False
 
 
@@ -111,19 +103,10 @@ def validate_device_common_mk_path(depot_path):
     Returns (exists, is_device_common_mk)
     """
     try:
-        # Check if path exists
-        result = subprocess.run(
-            f"p4 files {depot_path}", capture_output=True, text=True, shell=True
-        )
-        if result.returncode != 0 or "no such file" in result.stderr.lower():
+        if not get_default_p4_client().files(depot_path):
             return False, False
-
-        # Check if it's a device_common.mk file
-        is_device_common = depot_path.endswith("/device_common.mk")
-
-        return True, is_device_common
-
-    except:
+        return True, depot_path.endswith("/device_common.mk")
+    except Exception:
         return False, False
 
 
@@ -131,6 +114,8 @@ def validate_device_common_mk_path(depot_path):
 
 def create_changelist_silent(description="Auto changelist"):
     """Create pending changelist with template + dynamic description appended to [Title]"""
+    return get_default_p4_client().create_changelist(description)
+
     # Get changelist template
     changelist_spec = run_cmd("p4 change -o")
     
@@ -222,7 +207,7 @@ def map_two_depots_silent(depot1, depot2):
 
 def sync_file_silent(depot_path):
     """Sync file from depot without logging"""
-    run_cmd(f"p4 sync {depot_path}")
+    get_default_p4_client().sync(depot_path)
 
 def checkout_file_silent(depot_path, changelist_id, log_callback=None):
     """
@@ -235,14 +220,7 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
         log_callback: Optional callback for logging
     """
     try:
-        # Step 1: Check if file is already opened
-        check_cmd = f"p4 opened {depot_path}"
-        result = subprocess.run(
-            check_cmd, 
-            capture_output=True, 
-            text=True, 
-            shell=True
-        )
+        result = get_default_p4_client().opened(depot_path)
         
         # Case 1: File not opened yet
         if result.returncode != 0 or "not opened on this client" in result.stdout:
@@ -250,7 +228,7 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
                 log_callback(f"[CHECKOUT] File not opened, checking out to CL {changelist_id}")
             
             # Normal checkout
-            run_cmd(f"p4 edit -c {changelist_id} {depot_path}")
+            get_default_p4_client().edit(depot_path, changelist_id)
             
             if log_callback:
                 log_callback(f"[OK] Checked out to CL {changelist_id}")
@@ -266,7 +244,7 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
             # File is opened but can't parse CL - try checkout anyway
             if log_callback:
                 log_callback(f"[WARNING] File opened but CL not detected, attempting checkout")
-            run_cmd(f"p4 edit -c {changelist_id} {depot_path}")
+            get_default_p4_client().edit(depot_path, changelist_id)
             return
         
         current_cl = cl_match.group(1)
@@ -295,8 +273,7 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
             if log_callback:
                 log_callback(f"[REOPEN] Moving file from CL {current_cl} to CL {changelist_id}")
             
-            reopen_cmd = f"p4 reopen -c {changelist_id} {depot_path}"
-            run_cmd(reopen_cmd)
+            get_default_p4_client().reopen(depot_path, changelist_id)
             
             # Sync file to get latest version after moving to new CL
             if log_callback:
@@ -369,23 +346,7 @@ def get_integration_source_depot_path(depot_path: str, log_callback) -> Optional
     Returns None if no integration source found or parsing failed
     """
     try:
-        # FIXED COMMAND: Use #1 to get the first version (integration source)
-        cmd = f"p4 filelog -i {depot_path}#1"
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            encoding='utf-8',
-            errors='replace',
-            shell=True
-            )
-
-        if result.returncode != 0:
-            if log_callback:
-                log_callback(f"[WARNING] P4 filelog command failed for {depot_path}#1")
-            return None
-
-        output = result.stdout.strip()
+        output = get_default_p4_client().filelog(f"{depot_path}#1")
         if not output:
             if log_callback:
                 log_callback(f"[WARNING] Empty filelog output for {depot_path}#1")

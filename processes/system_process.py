@@ -17,8 +17,6 @@ Files processed per target branch:
 
 import os
 import re
-import subprocess
-from P4 import P4, P4Exception
 from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
     map_single_depot, sync_file_silent, checkout_file_silent,
@@ -26,6 +24,7 @@ from core.p4_operations import (
     is_workspace_like, auto_resolve_missing_branches, 
     find_device_common_mk_path, get_integration_source_depot_path
 )
+from core.p4_client import get_default_p4_client
 from config.p4_config import depot_to_local_path
 
 
@@ -282,15 +281,13 @@ service rscmgr /system/bin/rscmgr
         
         new_file_depot_path = construct_rscmgr_file_path(samsung_path, rscmgr_filename)
         
-        cmd = f"p4 add -c {changelist_id} {new_file_depot_path}"
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        
-        if result.returncode == 0:
+        try:
+            get_default_p4_client().add(new_file_depot_path, changelist_id)
             if log_callback:
                 log_callback(f"[OK] File added to P4 and changelist {changelist_id}")
-        else:
+        except Exception as e:
             if log_callback:
-                log_callback(f"[WARNING] p4 add result: {result.stderr}")
+                log_callback(f"[WARNING] p4 add result: {e}")
         
         return new_file_depot_path
         

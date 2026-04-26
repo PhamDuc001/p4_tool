@@ -9,10 +9,8 @@ NEW: Added dynamic changelist descriptions
 
 import os
 import re
-import subprocess
 import tkinter as tk
 from tkinter import simpledialog, messagebox
-from P4 import P4, P4Exception
 from core.p4_operations import (
     get_client_name, run_cmd, create_changelist_silent, 
     map_single_depot, sync_file_silent, checkout_file_silent,
@@ -20,6 +18,7 @@ from core.p4_operations import (
     is_workspace_like, auto_resolve_missing_branches, find_device_common_mk_path,
     get_integration_source_depot_path
 )
+from core.p4_client import get_default_p4_client
 from processes.system_process import (
     get_rscmgr_reference_from_device_common as find_rscmgr_filename_from_device_common,
     find_samsung_vendor_path_from_workspace,
@@ -433,19 +432,9 @@ def add_file_to_p4(file_depot_path, changelist_id, log_callback=None):
     try:
         if log_callback:
             log_callback(f"[P4] Adding new file to P4: {file_depot_path}")
-        
-        # Add file to P4
-        cmd = f"p4 add -c {changelist_id} {file_depot_path}"
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-        
-        if result.returncode == 0:
-            if log_callback:
-                log_callback(f"[OK] File added to P4 and changelist {changelist_id}")
-        else:
-            if log_callback:
-                log_callback(f"[ERROR] Failed to add file to P4: {result.stderr}")
-            raise RuntimeError(f"Failed to add file to P4: {result.stderr}")
-            
+        get_default_p4_client().add(file_depot_path, changelist_id)
+        if log_callback:
+            log_callback(f"[OK] File added to P4 and changelist {changelist_id}")
     except Exception as e:
         if log_callback:
             log_callback(f"[ERROR] Error adding file to P4: {str(e)}")

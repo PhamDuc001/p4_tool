@@ -10,8 +10,20 @@ from core.p4_operations import (
     sync_file_silent, create_changelist_silent, checkout_file_silent,
     get_integration_source_depot_path, find_device_common_mk_path
 )
-from core.file_operations import (
-    update_properties_in_file, create_backup, extract_properties_from_file
+from core.file_operations import create_backup
+from core.properties import (
+    enforce_structure_from_raw,
+    extract_properties_from_file,
+    update_properties_in_file,
+    validate_conditional_structure_match,
+)
+from core.properties.comparer import (
+    compare_properties as _compare_properties,
+    compare_property_dict as _compare_property_dict,
+)
+from core.properties.parser import (
+    extract_properties_from_file as _extract_properties_from_file,
+    parse_properties_block as _parse_properties_block,
 )
 from config.p4_config import depot_to_local_path
 
@@ -422,8 +434,6 @@ def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original
                     if props:
                         log_callback(f"[DEBUG]   {category}: {len(props)} properties")
                 
-                from core.file_operations import extract_properties_from_file, validate_conditional_structure_match, enforce_structure_from_raw
-                
                 # Check for structure match before applying
                 local_props = extract_properties_from_file(local_path)
                 match, diffs = validate_conditional_structure_match(properties_to_apply, local_props)
@@ -707,8 +717,10 @@ def apply_tuning_changes(current_properties, original_depot_paths,
                                                           log_callback, progress_callback, error_callback)
 
 # Utility functions
-def extract_properties_from_file(file_path):
+def _legacy_extract_properties_from_file(file_path):
     """Extract LMKD and Chimera properties from file"""
+    return _extract_properties_from_file(file_path)
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -759,66 +771,12 @@ def extract_block(lines, start_header, next_header_list):
 
 def parse_properties_block(block_lines):
     """Parse property block and extract key-value pairs"""
-    properties = {}
-    
-    for line in block_lines:
-        line = line.strip()
-        # Skip comments and empty lines  
-        if not line or line.startswith("#"):
-            continue
-        
-        # Skip PRODUCT_PROPERTY_OVERRIDES lines
-        if "PRODUCT_PROPERTY_OVERRIDES" in line:
-            continue
-        
-        # Look for property=value pattern
-        if "=" in line:
-            # Remove backslash if present
-            clean_line = line.rstrip(" \\")
-            
-            key, value = clean_line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            
-            # Remove any trailing comments
-            if "#" in value:
-                value = value.split("#")[0].strip()
-            
-            properties[key] = value
-    
-    return properties
+    return _parse_properties_block(block_lines)
 
 def compare_properties(beni_props, flumen_props):
     """Compare properties between BENI and FLUMEN files"""
-    differences = []
-    
-    # Compare LMKD properties
-    beni_lmkd = beni_props.get("LMKD", {})
-    flumen_lmkd = flumen_props.get("LMKD", {})
-    
-    lmkd_diffs = compare_property_dict(beni_lmkd, flumen_lmkd, "LMKD")
-    differences.extend(lmkd_diffs)
-    
-    # Compare Chimera properties
-    beni_chimera = beni_props.get("Chimera", {})
-    flumen_chimera = flumen_props.get("Chimera", {})
-    
-    chimera_diffs = compare_property_dict(beni_chimera, flumen_chimera, "Chimera")
-    differences.extend(chimera_diffs)
-    
-    return differences
+    return _compare_properties(beni_props, flumen_props, first_label="BENI", second_label="FLUMEN") or []
 
 def compare_property_dict(dict1, dict2, category):
     """Compare two property dictionaries"""
-    differences = []
-    
-    all_keys = set(dict1.keys()) | set(dict2.keys())
-    
-    for key in all_keys:
-        val1 = dict1.get(key, "<missing>")
-        val2 = dict2.get(key, "<missing>")
-        
-        if val1 != val2:
-            differences.append(f"{category}.{key}: BENI='{val1}' vs FLUMEN='{val2}'")
-    
-    return differences
+    return _compare_property_dict(dict1, dict2, category, first_label="BENI", second_label="FLUMEN")

@@ -1,88 +1,79 @@
 """
-P4 Configuration management
-Handles dynamic client name and workspace root detection
+P4 configuration helpers backed by the centralized P4 client.
 """
+
+from __future__ import annotations
+
 import os
-import subprocess
 import re
-# Global variables
+
+from config.settings import load_settings, save_settings
+from core.p4_client import get_default_p4_client
+
+
 CLIENT_NAME = None
 WORKSPACE_ROOT = None
 
 
 def get_p4_client_info():
-    """Get P4 client name and workspace root dynamically from P4 client spec"""
+    """Get P4 client name and workspace root from the active client spec."""
     try:
-        # Run p4 client command to get client spec
-        result = subprocess.run("p4 client -o", capture_output=True, text=True, shell=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to get P4 client info: {result.stderr}")
-        
-        client_spec = result.stdout
-        
-        # Find Client name from the spec
-        client_match = re.search(r"^Client:\s+(.+)$", client_spec, re.MULTILINE)
-        if not client_match:
+        spec = get_default_p4_client().fetch_client_spec()
+        client_name = spec.get("Client")
+        workspace_root = spec.get("Root")
+
+        if not client_name:
             raise RuntimeError("Could not find Client name in P4 client spec")
-        
-        client_name = client_match.group(1).strip()
-        
-        # Find Root path from the spec
-        root_match = re.search(r"^Root:\s+(.+)$", client_spec, re.MULTILINE)
-        if not root_match:
+        if not workspace_root:
             raise RuntimeError("Could not find Root path in P4 client spec")
-        
-        workspace_root = root_match.group(1).strip()
-        
-        # Validate that the workspace root path exists
         if not os.path.exists(workspace_root):
             raise RuntimeError(f"Workspace root path does not exist: {workspace_root}")
-        
+
         return client_name, workspace_root
-        
     except Exception as e:
         raise RuntimeError(f"Error getting P4 client info: {str(e)}")
 
+
 def initialize_p4_config():
-    """Initialize P4 configuration on startup"""
+    """Initialize P4 configuration on startup."""
     global CLIENT_NAME, WORKSPACE_ROOT
     try:
         CLIENT_NAME, WORKSPACE_ROOT = get_p4_client_info()
+        settings = load_settings()
+        settings.p4client = CLIENT_NAME
+        save_settings(settings)
         return True, f"P4 Config loaded: Client={CLIENT_NAME}, Workspace={WORKSPACE_ROOT}"
     except Exception as e:
         return False, str(e)
 
+
 def get_client_name():
-    """Get current client name"""
     return CLIENT_NAME
 
+
 def get_workspace_root():
-    """Get current workspace root"""
     return WORKSPACE_ROOT
 
+
 def depot_to_local_path(depot_path):
-    """Convert depot path to local path"""
     if not WORKSPACE_ROOT:
         raise RuntimeError("Workspace root not initialized. Please check P4 configuration.")
-    
-    # Remove //depot prefix and convert forward slashes to backslashes
+
     if depot_path.startswith("//depot/"):
-        relative_path = depot_path[8:]  # Remove "//depot/"
+        relative_path = depot_path[8:]
     elif depot_path.startswith("//"):
-        relative_path = depot_path[2:]  # Remove "//" prefix
+        relative_path = depot_path[2:]
     else:
         relative_path = depot_path
-    
-    # Convert forward slashes to backslashes for Windows paths
-    local_path = os.path.join(WORKSPACE_ROOT, relative_path.replace("/", os.sep))
-    return local_path
+
+    return os.path.join(WORKSPACE_ROOT, relative_path.replace("/", os.sep))
+
 
 def is_config_initialized():
-    """Check if P4 configuration is initialized"""
     return CLIENT_NAME is not None and WORKSPACE_ROOT is not None
 
+
 def refresh_p4_config():
-    """Refresh P4 configuration (useful if client settings change)"""
     global CLIENT_NAME, WORKSPACE_ROOT
     try:
         CLIENT_NAME, WORKSPACE_ROOT = get_p4_client_info()
@@ -90,63 +81,39 @@ def refresh_p4_config():
     except Exception as e:
         return False, str(e)
 
+
 def check_p4_login_status():
-    """Check if user is logged into P4 using 'p4 login -s' command"""
     try:
-        result = subprocess.run("p4 login -s", capture_output=True, text=True, shell=True)
-        
+        result = get_default_p4_client().login_status()
         if result.returncode != 0:
             return False
-            
         output = result.stdout.strip()
-        
-        # If output starts with "User" -> logged in
-        # If output starts with "Perforce" -> not logged in
-        if output.startswith("User"):
-            return True
-        elif output.startswith("Perforce"):
-            return False
-        else:
-            # Unexpected output, assume not logged in
-            return False
-            
-    except Exception as e:
-        # Error running command, assume not logged in
+        return output.startswith("User")
+    except Exception:
         return False
+
 
 def p4_login(password):
-    """Login to P4 with provided password"""
     try:
-        # Run p4 login command with password
-        result = subprocess.run(
-            "p4 login", 
-            input=password, 
-            capture_output=True, 
-            text=True, 
-            shell=True
-        )
-        
+        result = get_default_p4_client().login(password)
         if result.returncode != 0:
             return False
-            
         output = result.stdout.strip()
-        
-        # Check if login was successful
-        if output.endswith("logged in."):
-            return True
-        elif "Authentication failed." in output:
-            return False
-        else:
-            # Unexpected output, assume failed
-            return False
-            
-    except Exception as e:
-        # Error running command, assume failed
+        return output.endswith("logged in.")
+    except Exception:
         return False
 
+
 def get_p4_info_summary():
-    """Get a summary of current P4 configuration for display purposes"""
     if not is_config_initialized():
         return "P4 Configuration not initialized"
-    
     return f"Client: {CLIENT_NAME}\nWorkspace Root: {WORKSPACE_ROOT}"
+
+
+def p4_env_is_configured() -> bool:
+    output = get_default_p4_client().set_output()
+    names = {
+        match.group(1)
+        for match in re.finditer(r"^(P4[A-Z0-9_]+)=", output, flags=re.MULTILINE)
+    }
+    return {"P4PORT", "P4USER", "P4CLIENT"}.issubset(names)
