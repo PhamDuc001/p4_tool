@@ -258,10 +258,13 @@ Completed:
 - Added dry-run support to `TuningService.apply_changes(dry_run=True)`.
 - Tuning dry-run computes previews on temporary files without creating a changelist, checking out files, or writing target files.
 - Added tests verifying dry-run previews leave source files unchanged.
+- Extracted `add_assets_to_chipset_content(...)` so LoadApkAsset mutation logic can run as a pure content transform.
+- Added `LoadApkAssetService.preview_add_assets(...)` to compute file-level diffs without writing the target file.
+- Added tests covering LoadApkAsset duplicate handling and preview immutability.
 
 Acceptance criteria:
 
-- User can inspect changes before `p4 edit` and file write: met at service level for tuning.
+- User can inspect changes before `p4 edit` and file write: met at service level for tuning and LoadApkAsset file preview.
 - Canceling preview leaves files unchanged: dry-run path leaves files unchanged.
 - Applied operations produce a clear summary: met through `OperationResult` for migrated services.
 
@@ -318,7 +321,7 @@ Acceptance criteria:
 
 ## Recommended Next Implementation Order
 
-1. Expand dry-run previews from tuning into bring-up, readahead, and LoadApkAsset.
+1. Expand dry-run previews from tuning and LoadApkAsset file preview into bring-up, readahead, and multi-branch LoadApkAsset execution.
 2. Split legacy process modules into smaller domain-specific helpers behind the new service classes.
 3. Add settings GUI and recent workspace/path history.
 4. Convert useful scripts from `testing/` into pytest or remove them.
@@ -344,7 +347,7 @@ Acceptance criteria:
 - `core/file_operations.py` is intentionally retained for compatibility, but new property code should import from `core.properties.*`.
 - `processes/tuning_process.py` is intentionally retained as compatibility wrappers around `TuningService`.
 - Legacy process modules still contain broad functions that combine several responsibilities.
-- Dry-run/preview mode is complete for tuning only.
+- Dry-run/preview mode is complete for tuning and LoadApkAsset file preview only.
 - Settings GUI and recent path/workspace history are still future UX work.
 
 ## Definition Of Done For Current Milestone
@@ -360,4 +363,4 @@ This milestone is considered OK because:
 - Process/core/service layers are free of direct Tkinter dialog imports.
 - Packaging and release docs exist.
 
-Next milestone should focus on deeper internal decomposition of the legacy process modules and broadening dry-run previews beyond tuning.
+Next milestone should focus on deeper internal decomposition of the legacy process modules and broadening dry-run previews beyond tuning into the remaining workflows.

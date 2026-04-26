@@ -203,6 +203,55 @@ def extract_assets_from_block(block_content, log_callback=None):
     return []
 
 
+def add_assets_to_chipset_content(content: str, chipset_name: str, new_assets: List[str], log_callback=None) -> Tuple[str, bool, List[str]]:
+    """
+    Add new assets to a chipset in ReadaheadManager.java content.
+
+    Returns:
+        Tuple of updated content, whether content changed, and assets actually added.
+    """
+    # Find the if block for this chipset
+    chip_pattern = rf'(if\s*\(\s*PerformanceFeature\.CHIP_{chipset_name}\s*\)\s*\{{[^}}]*)(mReadahead\.updateAssetKey\(([^)]+)\))([^}}]*\}})'
+
+    match = re.search(chip_pattern, content, re.DOTALL)
+    if not match:
+        if log_callback:
+            log_callback(f"[ERROR] Could not find CHIP_{chipset_name} block")
+        raise RuntimeError(f"Chipset {chipset_name} not found in file")
+
+    prefix = match.group(1)
+    current_assets_str = match.group(3)
+    suffix = match.group(4)
+
+    # Extract current assets
+    current_assets = re.findall(r'ASSET_\w+', current_assets_str)
+
+    # Add new assets (avoid duplicates)
+    known_assets = set(current_assets)
+    assets_to_add = []
+    for asset in new_assets:
+        if asset in known_assets:
+            continue
+        assets_to_add.append(asset)
+        known_assets.add(asset)
+
+    if not assets_to_add:
+        if log_callback:
+            log_callback(f"[INFO] All assets already exist for {chipset_name}")
+        return content, False, []
+
+    # Build new asset string
+    all_assets = current_assets + assets_to_add
+    new_assets_str = " | ".join(all_assets)
+    new_update_call = f"mReadahead.updateAssetKey({new_assets_str})"
+
+    # Replace only the matched chipset block.
+    new_block = prefix + new_update_call + suffix
+    new_content = content[:match.start()] + new_block + content[match.end():]
+
+    return new_content, True, assets_to_add
+
+
 def add_assets_to_chipset(file_path, chipset_name, new_assets, changelist_id, log_callback=None):
     """
     Add new assets to specified chipset in ReadaheadManager.java
@@ -218,43 +267,17 @@ def add_assets_to_chipset(file_path, chipset_name, new_assets, changelist_id, lo
         
         with open(local_path, "r", encoding="utf-8") as f:
             content = f.read()
-        
-        # Find the if block for this chipset
-        chip_pattern = rf'(if\s*\(\s*PerformanceFeature\.CHIP_{chipset_name}\s*\)\s*\{{[^}}]*)(mReadahead\.updateAssetKey\(([^)]+)\))([^}}]*\}})'
-        
-        match = re.search(chip_pattern, content, re.DOTALL)
-        if not match:
-            if log_callback:
-                log_callback(f"[ERROR] Could not find CHIP_{chipset_name} block")
-            raise RuntimeError(f"Chipset {chipset_name} not found in file")
-        
-        prefix = match.group(1)
-        old_update_call = match.group(2)
-        current_assets_str = match.group(3)
-        suffix = match.group(4)
-        
-        # Extract current assets
-        current_assets = re.findall(r'ASSET_\w+', current_assets_str)
-        
-        # Add new assets (avoid duplicates)
-        assets_to_add = [asset for asset in new_assets if asset not in current_assets]
-        
-        if not assets_to_add:
-            if log_callback:
-                log_callback(f"[INFO] All assets already exist for {chipset_name}")
+
+        new_content, modified, assets_to_add = add_assets_to_chipset_content(
+            content,
+            chipset_name,
+            new_assets,
+            log_callback,
+        )
+
+        if not modified:
             return False
-        
-        # Build new asset string
-        all_assets = current_assets + assets_to_add
-        new_assets_str = " | ".join(all_assets)
-        new_update_call = f"mReadahead.updateAssetKey({new_assets_str})"
-        
-        # Replace in content
-        new_block = prefix + new_update_call + suffix
-        old_block = prefix + old_update_call + suffix
-        
-        new_content = content.replace(old_block, new_block)
-        
+
         # Write back to file
         with open(local_path, "w", encoding="utf-8") as f:
             f.write(new_content)
