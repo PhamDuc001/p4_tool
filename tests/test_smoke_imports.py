@@ -7,6 +7,7 @@ def test_core_modules_import():
         "core.p4_client",
         "core.p4_operations",
         "core.file_operations",
+        "services.tuning_service",
         "main",
     ]:
         importlib.import_module(module_name)

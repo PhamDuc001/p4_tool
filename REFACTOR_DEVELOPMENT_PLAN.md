@@ -4,7 +4,8 @@ Last updated: 2026-04-26
 
 ## Current Status
 
-The first refactor pass has been implemented and pushed to `main` in commit `dcb6db4`.
+The first refactor pass was implemented and pushed to `main` in commit `dcb6db4`.
+The current working tree starts Phase 4 by extracting the tuning workflow into a service layer.
 
 Completed:
 
@@ -20,6 +21,11 @@ Completed:
   - `core/properties/writer.py`
 - Reduced `core/file_operations.py` to compatibility wrappers plus bring-up block helpers and GUI conditional-analysis helpers.
 - Updated low-risk process imports to use canonical property modules.
+- Created initial `services/` package with shared result and confirmation models.
+- Extracted the tuning workflow into `services/tuning_service.py`.
+- Updated the tuning GUI to call `TuningService` directly.
+- Converted `processes/tuning_process.py` into a compatibility wrapper around the service layer.
+- Added focused service-level tuning tests.
 
 Verified:
 
@@ -28,7 +34,7 @@ python -m compileall -q .
 python -m pytest
 ```
 
-Current result: `16 passed`.
+Current result: `20 passed`.
 
 ## Current Architecture
 
@@ -47,6 +53,10 @@ P4_Tool/
       parser.py
       comparer.py
       writer.py
+  services/
+    __init__.py
+    models.py
+    tuning_service.py
   processes/
   gui/
   tests/
@@ -133,7 +143,7 @@ Acceptance criteria:
 
 ### Phase 4: Service Layer
 
-Status: Not started
+Status: Started
 
 Goal:
 
@@ -141,7 +151,7 @@ Move workflow logic out of GUI/process modules and make behavior testable withou
 
 Tasks:
 
-- Create `services/` package.
+- Create `services/` package: complete.
 - Add shared result models, for example:
 
 ```python
@@ -159,7 +169,7 @@ class ConfirmationRequest:
     options: list[str]
 ```
 
-- Move tuning workflow into `TuningService`.
+- Move tuning workflow into `TuningService`: complete for the active tuning GUI path.
 - Move bring-up workflow into `BringupService`.
 - Move readahead workflow into `ReadaheadService`.
 - Move LoadApkAsset workflow into `LoadApkAssetService`.
@@ -167,16 +177,26 @@ class ConfirmationRequest:
 - Inject dependencies such as `P4Client`, parser, writer, comparer, and logger.
 - Keep GUI tabs responsible for rendering dialogs and messages.
 
+Completed:
+
+- Added `services/models.py` with `OperationResult`, `ConfirmationRequest`, and `TuningLoadResult`.
+- Added `services/tuning_service.py` with load, comparison, confirmation-summary, auto-resolve, and apply methods.
+- Moved tuning change detection and confirmation message construction out of `gui/tuning_tab.py`.
+- Updated `gui/tuning_tab.py` to handle input validation, dialogs, table rendering, and service result display for tuning operations.
+- Added an optional reopen-confirmation callback to `checkout_file_silent` so migrated workflows can keep Tkinter prompts in the GUI layer.
+- Added `tests/test_tuning_service.py`.
+
 Known blockers/risk:
 
-- `processes/readahead_process.py`, `processes/system_process.py`, `processes/loadapkasset_process.py`, and `core/p4_operations.py` still call Tkinter dialogs directly.
+- `processes/readahead_process.py`, `processes/system_process.py`, and `processes/loadapkasset_process.py` still call Tkinter dialogs directly.
+- `core/p4_operations.py` still has a legacy Tkinter fallback when `checkout_file_silent` is called without a confirmation callback.
 - Some process functions combine validation, P4 access, file mutation, logging, and UI confirmation.
 
 Acceptance criteria:
 
 - GUI classes mostly collect inputs and render results.
-- Services can be tested without Tkinter.
-- Process/service code no longer calls `messagebox` or `simpledialog` directly.
+- Services can be tested without Tkinter: met for `TuningService`.
+- Process/service code no longer calls `messagebox` or `simpledialog` directly: met for the migrated tuning service path, not yet met for the remaining workflows.
 
 ### Phase 5: GUI Cleanup
 
@@ -267,16 +287,14 @@ Acceptance criteria:
 
 ## Recommended Next Implementation Order
 
-1. Create `services/` package and shared result/confirmation models.
-2. Extract `TuningService` first, because parser/writer/comparer are now stable.
-3. Remove Tkinter dialog calls from tuning/process paths.
-4. Extract `BringupService`.
-5. Extract `ReadaheadService`, then `LoadApkAssetService`.
-6. Add service-level tests with fake `P4Client`.
-7. Add dry-run/preview support to service methods.
-8. Add settings GUI after service boundaries are stable.
-9. Add structured logging.
-10. Improve packaging and release docs.
+1. Extract `BringupService`.
+2. Extract `ReadaheadService`, then `LoadApkAssetService`.
+3. Remove remaining process-level `messagebox` and `simpledialog` calls.
+4. Add service-level tests with fake `P4Client` for bring-up, readahead, and LoadApkAsset.
+5. Add dry-run/preview support to service methods.
+6. Add settings GUI after service boundaries are stable.
+7. Add structured logging.
+8. Improve packaging and release docs.
 
 ## High-Risk Areas To Keep Testing
 
@@ -296,9 +314,9 @@ Acceptance criteria:
 
 - `testing/` still contains old script-style checks. The active pytest suite is under `tests/`; old scripts should be reviewed and either converted or removed.
 - `core/file_operations.py` is intentionally retained for compatibility, but new property code should import from `core.properties.*`.
-- `processes/tuning_process.py` still contains some legacy helper wrappers.
+- `processes/tuning_process.py` is intentionally retained as compatibility wrappers around `TuningService`.
 - Several process modules still call `messagebox`/`simpledialog` directly.
-- Service layer does not exist yet.
+- Service layer exists for tuning only.
 - Dry-run/preview mode does not exist yet.
 
 ## Definition Of Done For Current Milestone
@@ -311,4 +329,4 @@ This milestone is considered OK because:
 - Property parsing/comparison/writing has canonical modules and tests.
 - Compatibility imports remain available for existing GUI/process code.
 
-Next milestone should focus on service extraction and Tkinter decoupling.
+Next milestone should focus on extracting bring-up/readahead/loadapkasset services and finishing Tkinter decoupling outside the tuning path.

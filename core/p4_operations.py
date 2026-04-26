@@ -209,7 +209,12 @@ def sync_file_silent(depot_path):
     """Sync file from depot without logging"""
     get_default_p4_client().sync(depot_path)
 
-def checkout_file_silent(depot_path, changelist_id, log_callback=None):
+def checkout_file_silent(
+    depot_path,
+    changelist_id,
+    log_callback=None,
+    confirm_reopen_callback=None,
+):
     """
     Checkout file for editing with smart CL management
     Checks if file is already opened and handles CL conflicts
@@ -259,14 +264,17 @@ def checkout_file_silent(depot_path, changelist_id, log_callback=None):
         if log_callback:
             log_callback(f"[WARNING] File is already opened in CL {current_cl}")
         
-        # Show confirmation dialog
-        from tkinter import messagebox
-        response = messagebox.askyesno(
-            "File Already Opened",
-            f"File is currently opened in changelist {current_cl}.\n\n"
-            f"Do you want to move it to changelist {changelist_id}?\n\n"
-            f"File: {depot_path}"
-        )
+        if confirm_reopen_callback:
+            response = confirm_reopen_callback(depot_path, current_cl, str(changelist_id))
+        else:
+            confirm_title = "File Already Opened"
+            confirm_message = (
+                f"File is currently opened in changelist {current_cl}.\n\n"
+                f"Do you want to move it to changelist {changelist_id}?\n\n"
+                f"File: {depot_path}"
+            )
+            from tkinter import messagebox
+            response = messagebox.askyesno(confirm_title, confirm_message)
         
         if response:
             # User chose Yes - reopen to new CL

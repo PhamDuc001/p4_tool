@@ -8,9 +8,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 from config.p4_config import get_client_name, get_workspace_root
-from processes.tuning_process import load_properties_for_tuning_enhanced, apply_tuning_changes_enhanced
 from gui.property_dialog import PropertyDialog
 from gui.comparison_dialog import ComparisonDialog  # New dialog for property comparison
+from services.tuning_service import TuningService
 
 
 class TuningTab:
@@ -27,6 +27,7 @@ class TuningTab:
         self.loaded_properties = None
         self.original_properties = {}
         self.comparison_data = None  # Store comparison data for 3 paths
+        self.tuning_service = TuningService()
         
         # Initialize components
         self.create_content()
@@ -266,18 +267,17 @@ class TuningTab:
             try:
                 self.gui_utils.update_status("Processing: Loading properties from 3 paths...")
                 
-                # Load properties from all 3 paths
-                result = load_properties_for_tuning_enhanced(
+                result = self.tuning_service.load_properties(
                     beni_path,
                     flumen_path,
-                    rel_path,  # NEW parameter
-                    self.progress_callback,
-                    self.gui_utils.error_callback,
-                    self.gui_utils.info_callback,
+                    rel_path,
+                    progress_callback=self.progress_callback,
+                    log_callback=self.log_callback,
                 )
 
                 if result:
-                    comparison_data, final_properties = result
+                    comparison_data = result.comparison_data
+                    final_properties = result.merged_properties
                     
                     # Store comparison data
                     self.comparison_data = comparison_data
@@ -296,6 +296,11 @@ class TuningTab:
                         0, lambda: self.gui_utils.update_status("Failed to load properties.")
                     )
 
+            except Exception as exc:
+                self.gui_utils.error_callback("Load Properties Error", str(exc))
+                self.gui_utils.root.after(
+                    0, lambda: self.gui_utils.update_status("Failed to load properties.")
+                )
             finally:
                 # Re-enable load button when done
                 self.gui_utils.root.after(
@@ -308,31 +313,7 @@ class TuningTab:
 
     def _are_properties_identical(self, comparison_data):
         """Check if all paths have identical properties"""
-        if not comparison_data:
-            return True
-            
-        # Get all valid paths
-        valid_paths = [path for path in ['BENI', 'FLUMEN', 'REL'] if path in comparison_data]
-        
-        if len(valid_paths) <= 1:
-            return True
-            
-        # Compare first path with others
-        first_path = valid_paths[0]
-        first_props = comparison_data[first_path]
-        
-        for path in valid_paths[1:]:
-            current_props = comparison_data[path]
-            
-            # Compare LMKD
-            if first_props.get('LMKD', {}) != current_props.get('LMKD', {}):
-                return False
-                
-            # Compare Chimera
-            if first_props.get('Chimera', {}) != current_props.get('Chimera', {}):
-                return False
-                
-        return True
+        return self.tuning_service.properties_are_identical(comparison_data)
 
     def _show_comparison_dialog(self, comparison_data):
         """Show comparison dialog for user to choose source properties"""
@@ -346,7 +327,7 @@ class TuningTab:
         """Finalize the properties loading process"""
         self.loaded_properties = final_properties
 
-        # Store original properties (without metadata) — preserve full conditional structure
+        # Store original properties (without metadata) and preserve full conditional structure.
         self.original_properties = {}
         for key, value in self.loaded_properties.items():
             if key != "_metadata":
@@ -387,46 +368,13 @@ class TuningTab:
 
         # Get depot paths - may need auto-resolve
         original_depot_paths = self.loaded_properties["_metadata"]["depot_paths"]
-        
-        # Check if we need to auto-resolve additional paths
-        needs_auto_resolve = len(original_depot_paths) == 1
-        
-        if needs_auto_resolve:
-            # Show confirmation with auto-resolve info
-            single_path = list(original_depot_paths.keys())[0]
-            confirm_message = f"You loaded properties from {single_path} only.\n\n"
-            
-            if single_path == "REL":
-                confirm_message += "Auto-resolve will find FLUMEN and BENI paths using integration history.\n"
-                confirm_message += "Changes will be applied to: REL → FLUMEN → BENI\n\n"
-            elif single_path == "FLUMEN":
-                confirm_message += "Auto-resolve will find BENI path using integration history.\n"
-                confirm_message += "Changes will be applied to: FLUMEN → BENI\n\n"
-            else:  # BENI
-                confirm_message += "No auto-resolve needed for BENI.\n"
-                confirm_message += "Changes will be applied to: BENI only\n\n"
-            
-            # Show changes summary
-            changes_summary = self._get_changes_summary(current_properties)
-            if changes_summary:
-                confirm_message += f"Changes to apply:\n{changes_summary}\n\n"
-            
-            confirm_message += "Do you want to continue?"
-            
-            if not messagebox.askyesno("Confirm Apply with Auto-Resolve", confirm_message):
-                return
-        else:
-            # Multiple paths loaded - standard confirmation
-            changes_summary = self._get_changes_summary(current_properties)
-            if changes_summary:
-                confirm_message = (
-                    f"The following changes will be applied to ALL PATHS:\n\n{changes_summary}\n\n"
-                )
-                confirm_message += "This will apply all property changes to BENI, FLUMEN, and REL files and create a pending changelist.\n\n"
-                confirm_message += "Do you want to continue?"
-
-                if not messagebox.askyesno("Confirm Apply Changes", confirm_message):
-                    return
+        confirmation = self.tuning_service.build_apply_confirmation(
+            original_depot_paths,
+            current_properties,
+            self.original_properties,
+        )
+        if not messagebox.askyesno(confirmation.title, confirmation.message):
+            return
 
         self._run_apply_tuning_enhanced_with_auto_resolve(current_properties, original_depot_paths)
 
@@ -453,19 +401,16 @@ class TuningTab:
                     "Processing: Applying tuning changes with auto-resolve..."
                 )
                 
-                # Import auto-resolve function from tuning_process
-                from processes.tuning_process import apply_tuning_changes_enhanced_with_auto_resolve
-                
-                success = apply_tuning_changes_enhanced_with_auto_resolve(
+                result = self.tuning_service.apply_changes(
                     current_properties,
                     original_depot_paths,
-                    self.log_callback,
-                    self.progress_callback,
-                    self.gui_utils.error_callback,
-                    self.original_properties  # Pass original properties for description generation
+                    log_callback=self.log_callback,
+                    progress_callback=self.progress_callback,
+                    original_properties=self.original_properties,
+                    confirm_reopen_callback=self._confirm_reopen_checkout,
                 )
 
-                if success:
+                if result.success:
                     self.gui_utils.root.after(
                         0,
                         lambda: self.gui_utils.update_status(
@@ -489,6 +434,7 @@ class TuningTab:
                         ),
                     )
                 else:
+                    self.gui_utils.error_callback("Apply Tuning Error", result.message)
                     self.gui_utils.root.after(
                         0,
                         lambda: self.gui_utils.update_status("Failed to apply tuning changes."),
@@ -507,6 +453,29 @@ class TuningTab:
         thread = threading.Thread(target=apply_thread, daemon=True)
         thread.start()
 
+    def _confirm_reopen_checkout(self, depot_path, current_changelist, target_changelist):
+        """Ask whether an already-opened file should move to the new changelist."""
+        title = "File Already Opened"
+        message = (
+            f"File is currently opened in changelist {current_changelist}.\n\n"
+            f"Do you want to move it to changelist {target_changelist}?\n\n"
+            f"File: {depot_path}"
+        )
+
+        if threading.current_thread() is threading.main_thread():
+            return messagebox.askyesno(title, message)
+
+        response = {"value": False}
+        completed = threading.Event()
+
+        def ask_user():
+            response["value"] = messagebox.askyesno(title, message)
+            completed.set()
+
+        self.gui_utils.root.after(0, ask_user)
+        completed.wait()
+        return response["value"]
+
     def _update_original_properties_after_apply(self, applied_properties):
         """Update original properties to match applied state"""
         for key, value in applied_properties.items():
@@ -517,70 +486,17 @@ class TuningTab:
 
     def _properties_unchanged(self, current_properties):
         """Check if properties have been modified or deleted (supports v2 conditional structure)"""
-        if not self.original_properties:
-            return True
-
-        import copy
-        for category in ("LMKD", "Chimera"):
-            orig = self.original_properties.get(category, {})
-            curr = current_properties.get(category, {})
-
-            # v2 structure: compare _flat and _conditional separately
-            if isinstance(orig, dict) and '_flat' in orig:
-                if orig.get('_flat', {}) != curr.get('_flat', {}):
-                    return False
-                orig_cond = orig.get('_conditional', [])
-                curr_cond = curr.get('_conditional', [])
-                if len(orig_cond) != len(curr_cond):
-                    return False
-                for ob, cb in zip(orig_cond, curr_cond):
-                    if ob.get('if_props') != cb.get('if_props'):
-                        return False
-                    if ob.get('else_props') != cb.get('else_props'):
-                        return False
-            else:
-                # Legacy flat dict comparison
-                if orig != curr:
-                    return False
-
-        return True
+        return self.tuning_service.properties_unchanged(
+            self.original_properties,
+            current_properties,
+        )
 
     def _get_changes_summary(self, current_properties):
         """Get summary of changes including additions, modifications, and deletions (v2 aware)"""
-        changes = []
-
-        for category in ("LMKD", "Chimera"):
-            orig = self.original_properties.get(category, {})
-            curr = current_properties.get(category, {})
-
-            if isinstance(orig, dict) and '_flat' in orig:
-                # v2 structure
-                flat_changes = self._compare_property_categories(
-                    orig.get('_flat', {}), curr.get('_flat', {}), f"{category}[flat]"
-                )
-                changes.extend(flat_changes)
-
-                orig_cond = orig.get('_conditional', [])
-                curr_cond = curr.get('_conditional', [])
-                for i, (ob, cb) in enumerate(zip(orig_cond, curr_cond)):
-                    cond_label = ob.get('condition', f'block{i}')[:40]
-                    if_changes = self._compare_property_categories(
-                        ob.get('if_props', {}), cb.get('if_props', {}),
-                        f"{category}[if: {cond_label}]"
-                    )
-                    changes.extend(if_changes)
-                    if ob.get('else_props') is not None or cb.get('else_props') is not None:
-                        else_changes = self._compare_property_categories(
-                            ob.get('else_props') or {}, cb.get('else_props') or {},
-                            f"{category}[else]"
-                        )
-                        changes.extend(else_changes)
-            else:
-                # Legacy flat dict
-                category_changes = self._compare_property_categories(orig, curr, category)
-                changes.extend(category_changes)
-
-        return "\n".join(changes) if changes else ""
+        return self.tuning_service.summarize_changes(
+            self.original_properties,
+            current_properties,
+        )
 
     def _compare_property_categories(self, original_dict, current_dict, category):
         """Compare two property dictionaries and return list of changes"""
@@ -601,7 +517,7 @@ class TuningTab:
             elif original_value != current_value:
                 # Modified
                 changes.append(
-                    f"[MODIFIED] {category}.{key}: {original_value} → {current_value}"
+                    f"[MODIFIED] {category}.{key}: {original_value} -> {current_value}"
                 )
 
         return changes
@@ -745,7 +661,7 @@ class TuningTab:
             return
 
         # For conditional properties (if/else block items), edit the value directly.
-        # The user clicked exactly one context node — just edit that specific value.
+                    # The user clicked exactly one context node; edit that specific value.
         if "conditional_property" in tags:
             ctx_label = "if" if "if_block" in tags else "else"
             dialog = PropertyDialog(
@@ -769,7 +685,7 @@ class TuningTab:
 
 
     def _edit_conditional_property(self, item, category, prop_name, prop_value, tags):
-        """Edit conditional property với ENHANCED context awareness"""
+        """Edit conditional property vá»›i ENHANCED context awareness"""
         # Get all contexts for this property name
         context_info = self._get_all_contexts_for_property(prop_name, category)
         
@@ -848,12 +764,12 @@ class TuningTab:
         }
 
     def _update_enhanced_conditional_property_values(self, original_item, dialog_result, category):
-        """Update property values trong các contexts được chọn"""
+        """Update property values trong cÃ¡c contexts Ä‘Æ°á»£c chá»n"""
         prop_name = dialog_result['name']
         values_by_context = dialog_result['values_by_context']
         selected_contexts = dialog_result.get('selected_contexts', list(values_by_context.keys()))
         
-        # Update values trong từng context được chọn
+        # Update values trong tá»«ng context Ä‘Æ°á»£c chá»n
         for parent in self.properties_tree.get_children():
             parent_values = self.properties_tree.item(parent, "values")
             if parent_values[0] == category:
@@ -861,7 +777,7 @@ class TuningTab:
                 for context_parent in self.properties_tree.get_children(parent):
                     context_values = self.properties_tree.item(context_parent, "values")
                     if len(context_values) >= 2 and context_values[1] in selected_contexts:
-                        # Update properties trong context này
+                        # Update properties trong context nÃ y
                         for prop_item in self.properties_tree.get_children(context_parent):
                             prop_values = self.properties_tree.item(prop_item, "values")
                             if len(prop_values) >= 3 and prop_values[1] == prop_name:
@@ -872,11 +788,11 @@ class TuningTab:
                                         prop_item, values=(category, prop_name, new_value)
                                     )
                 
-                # Update flat properties nếu có
+                # Update flat properties náº¿u cÃ³
                 for child in self.properties_tree.get_children(parent):
                     child_values = self.properties_tree.item(child, "values")
                     if len(child_values) >= 3 and child_values[1] == prop_name:
-                        # Nếu context 'default' được chọn, update flat property
+                        # Náº¿u context 'default' Ä‘Æ°á»£c chá»n, update flat property
                         if 'default' in selected_contexts and 'default' in values_by_context:
                             new_value = values_by_context['default']
                             self.properties_tree.item(
@@ -986,7 +902,7 @@ class TuningTab:
                 child_tags = self.properties_tree.item(child, "tags")
 
                 if "condition_group" in child_tags:
-                    # This is a conditional group node — get block index from tag
+                    # This is a conditional group node; get block index from tag.
                     block_idx = None
                     for tag in child_tags:
                         if tag.startswith("block_") and not tag.endswith("_if") and not tag.endswith("_else"):
@@ -998,7 +914,7 @@ class TuningTab:
                     if block_idx is None or block_idx >= len(rebuilt_conditionals):
                         continue
 
-                    # Clear existing props for this block — will refill from tree
+                    # Clear existing props for this block; they will be refilled from the tree.
                     rebuilt_conditionals[block_idx]['if_props'] = {}
 
                     for cond_child in self.properties_tree.get_children(child):
@@ -1027,30 +943,30 @@ class TuningTab:
         return properties
 
     def _get_conditional_table_properties(self):
-        """Extract properties từ table với conditional context information"""
+        """Extract properties tá»« table vá»›i conditional context information"""
         properties = {"LMKD": {}, "Chimera": {}}
         conditional_properties = {"LMKD": {}, "Chimera": {}}
 
-        # Duyệt qua tất cả items trong tree
+        # Duyá»‡t qua táº¥t cáº£ items trong tree
         for item in self.properties_tree.get_children():
             self._extract_properties_from_item(item, properties, conditional_properties)
 
         return properties, conditional_properties
 
     def _extract_properties_from_item(self, item, properties, conditional_properties, parent_context=None):
-        """Recursive helper để extract properties từ tree items"""
+        """Recursive helper Ä‘á»ƒ extract properties tá»« tree items"""
         values = self.properties_tree.item(item, "values")
         tags = self.properties_tree.item(item, "tags")
         
-        # Nếu là property item (có đủ 3 values và có property name)
+        # Náº¿u lÃ  property item (cÃ³ Ä‘á»§ 3 values vÃ  cÃ³ property name)
         if len(values) >= 3 and values[1]:
             category = values[0]
             prop_name = values[1]
             prop_value = values[2]
             
-            # Check nếu là conditional property
+            # Check náº¿u lÃ  conditional property
             if "conditional_property" in tags:
-                # Xác định conditional context từ parent
+                # XÃ¡c Ä‘á»‹nh conditional context tá»« parent
                 context = self._get_conditional_context(item)
                 if context:
                     if category not in conditional_properties:
@@ -1069,8 +985,8 @@ class TuningTab:
             self._extract_properties_from_item(child, properties, conditional_properties, item)
 
     def _get_conditional_context(self, item):
-        """Get conditional context cho một property item"""
-        # Get parent chain để xác định context
+        """Get conditional context cho má»™t property item"""
+        # Get parent chain Ä‘á»ƒ xÃ¡c Ä‘á»‹nh context
         parent = self.properties_tree.parent(item)
         if parent:
             parent_values = self.properties_tree.item(parent, "values")
@@ -1087,7 +1003,7 @@ class TuningTab:
     # ============================================================================
 
     def _load_conditional_properties_for_display(self, file_path):
-        """Load properties với conditional context information cho GUI display"""
+        """Load properties vá»›i conditional context information cho GUI display"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 file_content = f.read()
@@ -1121,7 +1037,7 @@ class TuningTab:
                     if block['else_properties']:
                         for prop in block['else_properties']:
                             block_info['else_properties'][prop['key']] = prop['value']
-                            # Note: Trong flat view, else value sẽ override if value
+                            # Note: Trong flat view, else value sáº½ override if value
                             display_data[section_name]['flat_properties'][prop['key']] = prop['value']
                     
                     display_data[section_name]['conditional_blocks'].append(block_info)
@@ -1133,12 +1049,12 @@ class TuningTab:
             return None
 
     def _populate_properties_table_conditional(self, properties_data, file_path=None):
-        """Populate the properties table với conditional structure display - ENHANCED"""
+        """Populate the properties table vá»›i conditional structure display - ENHANCED"""
         # Clear existing items
         for item in self.properties_tree.get_children():
             self.properties_tree.delete(item)
 
-        # Add LMKD properties (giữ nguyên để backward compatibility)
+        # Add LMKD properties (giá»¯ nguyÃªn Ä‘á»ƒ backward compatibility)
         if "LMKD" in properties_data and properties_data["LMKD"]:
             lmkd_parent = self.properties_tree.insert(
                 "", "end", text="LMKD", values=("LMKD", "", ""), tags=("category",)
@@ -1148,7 +1064,7 @@ class TuningTab:
                     lmkd_parent, "end", values=("LMKD", prop, value), tags=("property",)
                 )
 
-        # Add Chimera properties với ENHANCED conditional structure display
+        # Add Chimera properties vá»›i ENHANCED conditional structure display
         if "Chimera" in properties_data and properties_data["Chimera"]:
             if file_path:
                 # Try to load conditional structure for detailed display
@@ -1167,14 +1083,14 @@ class TuningTab:
             self.properties_tree.item(item, open=True)
 
     def _populate_enhanced_conditional_chimera_section(self, conditional_data):
-        """Populate Chimera section với ENHANCED conditional structure display"""
+        """Populate Chimera section vá»›i ENHANCED conditional structure display"""
         chimera_parent = self.properties_tree.insert(
             "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
         )
         
-        # Add conditional blocks với ENHANCED display
+        # Add conditional blocks vá»›i ENHANCED display
         for i, block in enumerate(conditional_data['conditional_blocks']):
-            # Create ENHANCED condition header với context information
+            # Create ENHANCED condition header vá»›i context information
             condition_text = block['condition']
             condition_display = f"[{condition_text}]" if not condition_text.startswith('else') else "[else]"
             
@@ -1185,7 +1101,7 @@ class TuningTab:
                 tags=("condition", "conditional_context")
             )
             
-            # Add properties from if block với context awareness
+            # Add properties from if block vá»›i context awareness
             for prop in block['properties']:
                 prop_key = prop['key']
                 prop_value = prop['value']
@@ -1199,7 +1115,7 @@ class TuningTab:
                     tags=("conditional_property", "if_block", f"context_{i}_if")
                 )
             
-            # Add properties from else block if exists với context awareness
+            # Add properties from else block if exists vá»›i context awareness
             if block['else_properties']:
                 else_parent = self.properties_tree.insert(
                     chimera_parent, "end",
@@ -1224,13 +1140,13 @@ class TuningTab:
         # Add info about conditional structure for user awareness
         info_parent = self.properties_tree.insert(
             chimera_parent, "end",
-            text="ⓘ Conditional Structure Info",
+            text="Conditional Structure Info",
             values=("Chimera", "Info", "Click to see all contexts"),
             tags=("info", "conditional_info")
         )
 
     def _populate_conditional_chimera_section(self, conditional_data):
-        """Populate Chimera section với conditional structure"""
+        """Populate Chimera section vá»›i conditional structure"""
         chimera_parent = self.properties_tree.insert(
             "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
         )
@@ -1278,7 +1194,7 @@ class TuningTab:
                     )
 
     def _populate_flat_chimera_section(self, properties):
-        """Populate Chimera section theo cách flat (backward compatibility)"""
+        """Populate Chimera section theo cÃ¡ch flat (backward compatibility)"""
         chimera_parent = self.properties_tree.insert(
             "", "end", text="Chimera", values=("Chimera", "", ""), tags=("category",)
         )

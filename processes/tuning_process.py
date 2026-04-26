@@ -1,22 +1,12 @@
 """
-Enhanced Tuning process implementation with 3-path support (BENI, FLUMEN, REL)
-Handles property loading, comparison, and applying changes to all 3 paths
-Updated with auto-resolve functionality and dynamic changelist descriptions
+Backward-compatible tuning process wrappers.
+
+The tuning workflow now lives in services.tuning_service. This module keeps the
+older import surface stable for GUI/process callers that have not been migrated.
 """
-import re
-from core.p4_operations import (
-    validate_depot_path, validate_device_common_mk_path, is_workspace_like,
-    map_single_depot, map_two_depots_silent, 
-    sync_file_silent, create_changelist_silent, checkout_file_silent,
-    get_integration_source_depot_path, find_device_common_mk_path
-)
-from core.file_operations import create_backup
-from core.properties import (
-    enforce_structure_from_raw,
-    extract_properties_from_file,
-    update_properties_in_file,
-    validate_conditional_structure_match,
-)
+
+from __future__ import annotations
+
 from core.properties.comparer import (
     compare_properties as _compare_properties,
     compare_property_dict as _compare_property_dict,
@@ -25,734 +15,173 @@ from core.properties.parser import (
     extract_properties_from_file as _extract_properties_from_file,
     parse_properties_block as _parse_properties_block,
 )
-from config.p4_config import depot_to_local_path
+from services.tuning_service import TuningService
+
+
+_DEFAULT_SERVICE = TuningService()
+
+
+def _service() -> TuningService:
+    return _DEFAULT_SERVICE
 
 
 def generate_tuning_description(original_properties, current_properties):
-    """
-    Generate dynamic changelist description for Tuning mode based on changes
-    
-    Args:
-        original_properties: Properties before modification
-        current_properties: Properties after modification
-    
-    Returns:
-        str: Generated description for changelist
-    """
-    if not original_properties or not current_properties:
-        return "Tuning - Apply property changes"
-    
-    # Remove metadata if present
-    original_props = {k: v for k, v in original_properties.items() if k != "_metadata"}
-    current_props = {k: v for k, v in current_properties.items() if k != "_metadata"}
-    
-    # Analyze changes for each category
-    changes_by_category = {}
-    for category in ["LMKD", "Chimera"]:
-        changes_by_category[category] = analyze_property_changes(
-            original_props.get(category, {}),
-            current_props.get(category, {})
-        )
-    
-    # Build description from changes
-    description_parts = []
-    for category in ["LMKD", "Chimera"]:
-        part = build_category_description_part(category, changes_by_category[category])
-        if part:
-            description_parts.append(part)
-    
-    if not description_parts:
-        return "Tuning - No changes detected"
-    
-    # Join all parts with " & "
-    return " & ".join(description_parts)
+    return _service().generate_tuning_description(original_properties, current_properties)
 
 
 def analyze_property_changes(original_dict, current_dict):
-    """
-    Analyze property changes between original and current state
-    
-    Returns:
-        dict: Dict with keys 'add', 'modify', 'delete' containing lists of property names
-    """
-    changes = {
-        "add": [],
-        "modify": [],
-        "delete": []
-    }
-    
-    if not original_dict:
-        original_dict = {}
-    
-    if not current_dict:
-        current_dict = {}
-    
-    original_keys = set(original_dict.keys())
-    current_keys = set(current_dict.keys())
-    
-    # Added properties
-    added = current_keys - original_keys
-    if added:
-        changes["add"] = sorted(list(added))
-    
-    # Deleted properties
-    deleted = original_keys - current_keys
-    if deleted:
-        changes["delete"] = sorted(list(deleted))
-    
-    # Modified properties (in both, AND value changed)
-    modified = []
-    for key in original_keys & current_keys:
-        # Check if value actually changed
-        if original_dict[key] != current_dict[key]:
-            modified.append(key)
-    
-    if modified:
-        changes["modify"] = sorted(modified)
-    
-    return changes
+    return _service()._analyze_property_changes(original_dict, current_dict)
 
 
 def build_category_description_part(category, changes):
-    """
-    Build description part for a single category
-    
-    Args:
-        category: Category name (LMKD or Chimera)
-        changes: Dict with 'add', 'modify', 'delete' lists
-    
-    Returns:
-        str: Description part for this category, or empty if no changes
-    """
-    add_list = changes.get("add", [])
-    modify_list = changes.get("modify", [])
-    delete_list = changes.get("delete", [])
-    
-    # If no changes in this category
-    if not any(changes.values()):
-        return ""
-    
-    add_count = len(add_list)
-    modify_count = len(modify_list)
-    delete_count = len(delete_list)
-    
-    # Count total operations
-    total_ops = add_count + modify_count + delete_count
-    
-    # Case 1: Only Add operations
-    if add_count > 0 and modify_count == 0 and delete_count == 0:
-        if add_count == 1:
-            return f"Add value {add_list[0]}"
-        else:
-            return f"Add {category} values"
-    
-    # Case 2: Only Delete operations
-    elif delete_count > 0 and add_count == 0 and modify_count == 0:
-        if delete_count == 1:
-            return f"Delete value {delete_list[0]}"
-        else:
-            return f"Delete {category} values"
-    
-    # Case 3: Only Modify operations
-    elif modify_count > 0 and add_count == 0 and delete_count == 0:
-        if modify_count == 1:
-            return f"Tunning value {modify_list[0]}"
-        else:
-            return f"Tuning {category}"
-    
-    # Case 4: Add + Modify
-    elif add_count > 0 and modify_count > 0 and delete_count == 0:
-        return f"Add & Tunning {category}"
-    
-    # Case 5: Modify + Delete
-    elif modify_count > 0 and delete_count > 0 and add_count == 0:
-        return f"Tunning & Delete {category}"
-    
-    # Case 6: Add + Delete
-    elif add_count > 0 and delete_count > 0 and modify_count == 0:
-        return f"Add & Delete {category}"
-    
-    # Case 7: All 3 operations
-    elif add_count > 0 and modify_count > 0 and delete_count > 0:
-        return f"Add/Tune/Delete {category}"
-    
-    # Fallback
-    else:
-        return f"Update {category}"
+    return _service()._build_category_description_part(category, changes)
 
 
 def resolve_tuning_input_to_depot_path(user_input, log_callback=None):
-    """
-    Resolve tuning input (depot path or workspace) to device_common.mk depot path
-    
-    Args:
-        user_input: Can be depot path (//depot/...) or workspace name (TEMPLATE_*)
-        log_callback: Optional callback for logging
-    
-    Returns:
-        str: Resolved depot path to device_common.mk file
-    
-    Raises:
-        RuntimeError: If input validation or resolution fails
-    """
-    if not user_input:
-        return ""
-    
-    user_input = user_input.strip()
-    
-    # Case 1: Depot path
-    if user_input.startswith("//"):
-        if log_callback:
-            log_callback(f"[TUNING] Detected depot path: {user_input}")
-        
-        # Validate path exists
-        if not validate_depot_path(user_input):
-            raise RuntimeError(f"Depot path does not exist: {user_input}")
-        
-        # Validate it's a device_common.mk file
-        exists, is_device_common = validate_device_common_mk_path(user_input)
-        if not exists:
-            raise RuntimeError(f"Depot path does not exist: {user_input}")
-        elif not is_device_common:
-            raise RuntimeError(f"Path must be a device_common.mk file: {user_input}")
-        
-        if log_callback:
-            log_callback(f"[OK] Valid depot path: {user_input}")
-        return user_input
-    
-    # Case 2: Workspace name
-    elif is_workspace_like(user_input):
-        if log_callback:
-            log_callback(f"[TUNING] Detected workspace: {user_input}")
-        
-        try:
-            resolved_path, _ = find_device_common_mk_path(user_input, log_callback)
-            if log_callback:
-                log_callback(f"[OK] Resolved workspace to device_common.mk: {resolved_path}")
-            return resolved_path
-        except Exception as e:
-            raise RuntimeError(f"Workspace resolution failed: {str(e)}")
-    
-    else:
-        raise RuntimeError(f"Input must be depot path (//depot/...) or workspace (TEMPLATE_*): {user_input}")
+    return _service().resolve_input_to_depot_path(user_input, log_callback)
+
 
 def map_three_depots_silent(depot1, depot2, depot3):
-    """Map three depots to client spec without logging"""
-    from core.p4_operations import get_client_name, run_cmd
-    client_name = get_client_name()
-    if not client_name:
-        raise RuntimeError("Client name not initialized. Please check P4 configuration.")
-    
-    client_spec = run_cmd("p4 client -o")
-    lines = client_spec.splitlines()
-    new_lines = []
-    for line in lines:
-        if depot1 in line or depot2 in line or depot3 in line:
-            continue
-        new_lines.append(line)
-    new_lines.append(f"\t{depot1}\t//{client_name}/{depot1[2:]}")
-    new_lines.append(f"\t{depot2}\t//{client_name}/{depot2[2:]}")
-    new_lines.append(f"\t{depot3}\t//{client_name}/{depot3[2:]}")
-    new_spec = "\n".join(new_lines)
-    run_cmd("p4 client -i", input_text=new_spec)
+    return _service()._map_three_depots_silent(depot1, depot2, depot3)
+
 
 def auto_resolve_missing_depot_paths(original_depot_paths, log_callback=None):
-    """
-    Auto-resolve missing depot paths using integration history
-    Returns expanded depot_paths dict with resolved paths
-    """
-    if log_callback:
-        log_callback("[AUTO-RESOLVE] Starting auto-resolve for missing depot paths...")
-    
-    resolved_paths = original_depot_paths.copy()
-    
-    try:
-        # Get the single provided path
-        provided_path_name = list(original_depot_paths.keys())[0]
-        provided_depot_path = original_depot_paths[provided_path_name]
-        
-        if log_callback:
-            log_callback(f"[AUTO-RESOLVE] Starting from {provided_path_name}: {provided_depot_path}")
-        
-        # Case 1: REL provided → resolve FLUMEN → resolve BENI
-        if provided_path_name == "REL":
-            if log_callback:
-                log_callback("[AUTO-RESOLVE] REL → FLUMEN → BENI resolution")
-            
-            # Map and sync REL file
-            map_single_depot(provided_depot_path)
-            sync_file_silent(provided_depot_path)
-            
-            # Get FLUMEN path from REL integration history
-            flumen_path = get_integration_source_depot_path(provided_depot_path, log_callback)
-            if not flumen_path:
-                raise RuntimeError(f"Cannot find integration source for REL: {provided_depot_path}")
-            
-            if not validate_depot_path(flumen_path):
-                raise RuntimeError(f"Integration source does not exist: {flumen_path}")
-            
-            resolved_paths["FLUMEN"] = flumen_path
-            if log_callback:
-                log_callback(f"[AUTO-RESOLVE] Found FLUMEN: {flumen_path}")
-            
-            # Map and sync FLUMEN file
-            map_single_depot(flumen_path)
-            sync_file_silent(flumen_path)
-            
-            # Get BENI path from FLUMEN integration history
-            beni_path = get_integration_source_depot_path(flumen_path, log_callback)
-            if not beni_path:
-                raise RuntimeError(f"Cannot find integration source for FLUMEN: {flumen_path}")
-            
-            if not validate_depot_path(beni_path):
-                raise RuntimeError(f"Integration source does not exist: {beni_path}")
-            
-            resolved_paths["BENI"] = beni_path
-            if log_callback:
-                log_callback(f"[AUTO-RESOLVE] Found BENI: {beni_path}")
-                
-        # Case 2: FLUMEN provided → resolve BENI
-        elif provided_path_name == "FLUMEN":
-            if log_callback:
-                log_callback("[AUTO-RESOLVE] FLUMEN → BENI resolution")
-            
-            # Map and sync FLUMEN file
-            map_single_depot(provided_depot_path)
-            sync_file_silent(provided_depot_path)
-            
-            # Get BENI path from FLUMEN integration history
-            beni_path = get_integration_source_depot_path(provided_depot_path, log_callback)
-            if not beni_path:
-                raise RuntimeError(f"Cannot find integration source for FLUMEN: {provided_depot_path}")
-            
-            if not validate_depot_path(beni_path):
-                raise RuntimeError(f"Integration source does not exist: {beni_path}")
-            
-            resolved_paths["BENI"] = beni_path
-            if log_callback:
-                log_callback(f"[AUTO-RESOLVE] Found BENI: {beni_path}")
-                
-        # Case 3: BENI provided → no resolution needed
-        elif provided_path_name == "BENI":
-            if log_callback:
-                log_callback("[AUTO-RESOLVE] BENI provided - no resolution needed")
-        
-        # Log final resolved paths
-        if log_callback:
-            log_callback("[AUTO-RESOLVE] Final resolved paths:")
-            for path_name, depot_path in resolved_paths.items():
-                log_callback(f"[RESOLVED] {path_name}: {depot_path}")
-        
-        return resolved_paths
-        
-    except Exception as e:
-        if log_callback:
-            log_callback(f"[AUTO-RESOLVE ERROR] {str(e)}")
-            log_callback("[FALLBACK] Using original paths without auto-resolve")
-        return original_depot_paths
+    return _service().auto_resolve_missing_depot_paths(
+        original_depot_paths,
+        log_callback=log_callback,
+    )
 
-def apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original_depot_paths, 
-                                                   log_callback, progress_callback=None, error_callback=None,
-                                                   original_properties=None):
-    """Apply property changes to all target files with auto-resolve for missing paths"""
-    try:
-        # Remove metadata if present
-        properties_to_apply = {}
-        for key, value in current_properties.items():
-            if key != "_metadata":
-                properties_to_apply[key] = value
-        
-        log_callback("[TUNING] Starting apply tuning changes with auto-resolve...")
-        
-        # Count properties for logging
-        total_lmkd = len(properties_to_apply.get("LMKD", {}))
-        total_chimera = len(properties_to_apply.get("Chimera", {}))
-        log_callback(f"[INFO] Properties to apply: LMKD={total_lmkd}, Chimera={total_chimera}")
-        
-        if progress_callback:
-            progress_callback(5)
-        
-        # Auto-resolve missing paths if only one path provided
-        if len(original_depot_paths) == 1:
-            log_callback("[AUTO-RESOLVE] Single path detected - performing auto-resolve...")
-            resolved_depot_paths = auto_resolve_missing_depot_paths(original_depot_paths, log_callback)
-        else:
-            log_callback("[INFO] Multiple paths provided - skipping auto-resolve")
-            resolved_depot_paths = original_depot_paths
-        
-        if progress_callback:
-            progress_callback(15)
-        
-        # Generate dynamic changelist description based on changes
-        description = "Tuning - Apply property changes to all paths"
-        if original_properties:
-            description = generate_tuning_description(original_properties, current_properties)
-            log_callback(f"[DESCRIPTION] Generated changelist description: {description}")
-        
-        # Create changelist for modifications
-        log_callback("[STEP 1] Creating pending changelist for tuning changes...")
-        changelist_id = create_changelist_silent(description)
-        log_callback(f"[OK] Created changelist {changelist_id}")
-        
-        if progress_callback:
-            progress_callback(25)
-        
-        # Map all depot paths
-        depot_paths_list = list(resolved_depot_paths.values())
-        if len(depot_paths_list) == 1:
-            map_single_depot(depot_paths_list[0])
-        elif len(depot_paths_list) == 2:
-            map_two_depots_silent(depot_paths_list[0], depot_paths_list[1])
-        elif len(depot_paths_list) == 3:
-            map_three_depots_silent(depot_paths_list[0], depot_paths_list[1], depot_paths_list[2])
-        
-        # Process each target file
-        processed_files = []
-        progress_step = 60 // len(resolved_depot_paths)  # Divide remaining progress
-        
-        for i, (path_name, depot_path) in enumerate(resolved_depot_paths.items()):
-            try:
-                log_callback(f"[STEP 2.{i+1}] Processing {path_name} file...")
-                
-                # Sync latest version
-                sync_file_silent(depot_path)
-                log_callback(f"[OK] Synced latest version of {path_name}")
-                
-                if progress_callback:
-                    progress_callback(25 + (i + 1) * progress_step)
-                
-                # Checkout for editing
-                checkout_file_silent(depot_path, changelist_id)
-                log_callback(f"[OK] Checked out {path_name} for editing")
-                
-                # Get local path and apply changes
-                local_path = depot_to_local_path(depot_path)
-                
-                # Log what will be applied
-                log_callback(f"[DEBUG] Applying properties to {path_name}:")
-                for category, props in properties_to_apply.items():
-                    if props:
-                        log_callback(f"[DEBUG]   {category}: {len(props)} properties")
-                
-                # Check for structure match before applying
-                local_props = extract_properties_from_file(local_path)
-                match, diffs = validate_conditional_structure_match(properties_to_apply, local_props)
-                
-                if not match:
-                    log_callback(f"[WARNING] Structure mismatch detected in {path_name}: {diffs}")
-                    log_callback(f"[INFO] Enforcing structure from source (higher branch)...")
-                    
-                    enf_success, enf_err = enforce_structure_from_raw(local_path, properties_to_apply)
-                    if not enf_success:
-                        log_callback(f"[ERROR] Failed to enforce structure: {enf_err}")
-                        if error_callback:
-                            error_callback("Apply Error", f"Failed to enforce structure in {path_name}: {enf_err}")
-                        return False
-                    else:
-                        log_callback(f"[OK] Source structure successfully enforced onto {path_name}.")
-                
-                success, error_msg = update_properties_in_file(local_path, properties_to_apply)
-                
-                if success:
-                    log_callback(f"[OK] Applied tuning changes to {path_name}.")
-                    processed_files.append(path_name)
-                else:
-                    log_callback(f"[ERROR] Failed to apply changes to {path_name}: {error_msg}")
-                    if error_callback:
-                        error_callback("Apply Error", f"Failed to apply changes to {path_name}: {error_msg}")
-                    return False
-                
-            except Exception as e:
-                log_callback(f"[ERROR] Error processing {path_name}: {str(e)}")
-                if error_callback:
-                    error_callback("Processing Error", f"Error processing {path_name}: {str(e)}")
-                return False
-        
-        if progress_callback:
-            progress_callback(100)
-        
-        log_callback(f"[SUCCESS] Tuning changes applied successfully to: {', '.join(processed_files)}")
-        log_callback(f"[INFO] Changelist {changelist_id} contains all modifications for all paths")
-        
-        # Log auto-resolve summary if it was used
-        if len(original_depot_paths) == 1:
-            original_path = list(original_depot_paths.keys())[0]
-            log_callback(f"[SUMMARY] Auto-resolved from {original_path} to {len(processed_files)} files")
-        
-        log_callback(f"[INFO] All properties have been synchronized across {len(processed_files)} files")
-        
-        return True
-        
-    except Exception as e:
-        log_callback(f"[ERROR] Apply tuning changes failed: {str(e)}")
-        if error_callback:
-            error_callback("Apply Tuning Error", str(e))
-        return False
 
-def load_properties_for_tuning_enhanced(beni_input, flumen_input, rel_input,
-                                       progress_callback=None, error_callback=None, info_callback=None):
+def apply_tuning_changes_enhanced_with_auto_resolve(
+    current_properties,
+    original_depot_paths,
+    log_callback,
+    progress_callback=None,
+    error_callback=None,
+    original_properties=None,
+    confirm_reopen_callback=None,
+):
+    """Apply property changes to all target files with auto-resolve for missing paths."""
+    result = _service().apply_changes(
+        current_properties,
+        original_depot_paths,
+        log_callback=log_callback,
+        progress_callback=progress_callback,
+        original_properties=original_properties,
+        confirm_reopen_callback=confirm_reopen_callback,
+    )
+    if not result.success and error_callback:
+        error_callback("Apply Tuning Error", result.message)
+    return result.success
+
+
+def load_properties_for_tuning_enhanced(
+    beni_input,
+    flumen_input,
+    rel_input,
+    progress_callback=None,
+    error_callback=None,
+    info_callback=None,
+):
     """
-    Load and compare properties from BENI, FLUMEN, and REL files
-    ENHANCED: Now supports both depot paths and workspace names
+    Load and compare properties from BENI, FLUMEN, and REL files.
+
+    Returns the legacy tuple: (comparison_data, merged_properties).
     """
     try:
-        # Validate and resolve inputs first
-        paths_to_process = {}
-        
-        # Process BENI
-        if beni_input:
-            try:
-                resolved_beni = resolve_tuning_input_to_depot_path(beni_input, None)
-                if resolved_beni:
-                    paths_to_process["BENI"] = resolved_beni
-            except Exception as e:
-                if error_callback:
-                    error_callback("BENI Input Error", str(e))
-                return None
-        
-        # Process FLUMEN
-        if flumen_input:
-            try:
-                resolved_flumen = resolve_tuning_input_to_depot_path(flumen_input, None)
-                if resolved_flumen:
-                    paths_to_process["FLUMEN"] = resolved_flumen
-            except Exception as e:
-                if error_callback:
-                    error_callback("FLUMEN Input Error", str(e))
-                return None
-        
-        # Process REL
-        if rel_input:
-            try:
-                resolved_rel = resolve_tuning_input_to_depot_path(rel_input, None)
-                if resolved_rel:
-                    paths_to_process["REL"] = resolved_rel
-            except Exception as e:
-                if error_callback:
-                    error_callback("REL Input Error", str(e))
-                return None
-        
-        if not paths_to_process:
-            if error_callback:
-                error_callback("No Valid Inputs", "At least one valid input (workspace or depot path) is required.")
-            return None
-        
-        if progress_callback:
-            progress_callback(20)
-        
-        # Map and sync files based on number of paths
-        depot_paths_list = list(paths_to_process.values())
-        if len(depot_paths_list) == 1:
-            map_single_depot(depot_paths_list[0])
-        elif len(depot_paths_list) == 2:
-            map_two_depots_silent(depot_paths_list[0], depot_paths_list[1])
-        elif len(depot_paths_list) == 3:
-            map_three_depots_silent(depot_paths_list[0], depot_paths_list[1], depot_paths_list[2])
-        
-        # Sync all files
-        for depot_path in depot_paths_list:
-            sync_file_silent(depot_path)
-        
-        if progress_callback:
-            progress_callback(60)
-        
-        # Extract properties from all paths
-        comparison_data = {}
-        all_depot_paths = {}
-        
-        for path_name, depot_path in paths_to_process.items():
-            local_path = depot_to_local_path(depot_path)
-            properties = extract_properties_from_file(local_path)
-            
-            if not properties:
-                if error_callback:
-                    error_callback("Properties Not Found", f"{path_name} file does not contain LMKD or Chimera properties")
-                return None
-            
-            # Add metadata to each path's properties
-            properties["_metadata"] = {
-                "depot_paths": {path_name: depot_path},
-                "original_properties": properties.copy()
-            }
-            
-            comparison_data[path_name] = properties
-            all_depot_paths[path_name] = depot_path
-        
-        if progress_callback:
-            progress_callback(80)
-        
-        # Create merged properties (use first available path as base)
-        first_path = list(comparison_data.keys())[0]
-        merged_properties = comparison_data[first_path].copy()
-        
-        # Update metadata to include all depot paths
-        merged_properties["_metadata"] = {
-            "depot_paths": all_depot_paths,
-            "original_properties": merged_properties.copy()
-        }
-        
-        if progress_callback:
-            progress_callback(100)
-        
-        # Return both comparison data and merged properties
-        return (comparison_data, merged_properties)
-        
-    except Exception as e:
+        result = _service().load_properties(
+            beni_input,
+            flumen_input,
+            rel_input,
+            progress_callback=progress_callback,
+        )
+        return result.comparison_data, result.merged_properties
+    except Exception as exc:
         if error_callback:
-            error_callback("Load Properties Error", str(e))
+            error_callback("Load Properties Error", str(exc))
         return None
 
-def apply_tuning_changes_enhanced(current_properties, depot_paths_dict, 
-                                 log_callback, progress_callback=None, error_callback=None):
-    """Apply property changes to all target files (BENI, FLUMEN, REL) - legacy function"""
-    return apply_tuning_changes_enhanced_with_auto_resolve(current_properties, depot_paths_dict, 
-                                                          log_callback, progress_callback, error_callback)
 
-# Keep original functions for backward compatibility
-def load_properties_for_tuning(beni_depot_path, flumen_depot_path, 
-                              progress_callback=None, error_callback=None, info_callback=None):
-    """Legacy function - load properties from BENI and FLUMEN only"""
+def apply_tuning_changes_enhanced(
+    current_properties,
+    depot_paths_dict,
+    log_callback,
+    progress_callback=None,
+    error_callback=None,
+):
+    """Apply property changes to all target files (BENI, FLUMEN, REL)."""
+    return apply_tuning_changes_enhanced_with_auto_resolve(
+        current_properties,
+        depot_paths_dict,
+        log_callback,
+        progress_callback,
+        error_callback,
+    )
+
+
+def load_properties_for_tuning(
+    beni_depot_path,
+    flumen_depot_path,
+    progress_callback=None,
+    error_callback=None,
+    info_callback=None,
+):
+    """Legacy function: load properties from BENI and FLUMEN only."""
     try:
-        # Validate paths first
-        process_beni = False
-        process_flumen = False
-        
-        if beni_depot_path and beni_depot_path.startswith("//"):
-            if validate_depot_path(beni_depot_path):
-                process_beni = True
-            else:
-                if error_callback:
-                    error_callback("Path Not Found", f"BENI depot path does not exist: {beni_depot_path}")
-                return None
-        
-        if flumen_depot_path and flumen_depot_path.startswith("//"):
-            if validate_depot_path(flumen_depot_path):
-                process_flumen = True
-            else:
-                if error_callback:
-                    error_callback("Path Not Found", f"FLUMEN depot path does not exist: {flumen_depot_path}")
-                return None
-        
-        if not process_beni and not process_flumen:
-            if error_callback:
-                error_callback("No Valid Paths", "At least one valid depot path is required.")
-            return None
-        
-        if progress_callback:
-            progress_callback(20)
-        
-        # Map and sync files
-        if process_beni and process_flumen:
-            map_two_depots_silent(beni_depot_path, flumen_depot_path)
-            sync_file_silent(beni_depot_path)
-            sync_file_silent(flumen_depot_path)
-        elif process_beni:
-            map_single_depot(beni_depot_path)
-            sync_file_silent(beni_depot_path)
-        elif process_flumen:
-            map_single_depot(flumen_depot_path)
-            sync_file_silent(flumen_depot_path)
-        
-        if progress_callback:
-            progress_callback(60)
-        
-        # Get local paths and extract properties
-        properties_data = {}
-        depot_paths = {}
-        
-        if process_beni:
-            beni_local = depot_to_local_path(beni_depot_path)
-            beni_properties = extract_properties_from_file(beni_local)
-            if not beni_properties:
-                if error_callback:
-                    error_callback("Properties Not Found", "BENI file does not contain LMKD or Chimera properties")
-                return None
-            properties_data["BENI"] = beni_properties
-            depot_paths["BENI"] = beni_depot_path
-        
-        if process_flumen:
-            flumen_local = depot_to_local_path(flumen_depot_path)
-            flumen_properties = extract_properties_from_file(flumen_local)
-            if not flumen_properties:
-                if error_callback:
-                    error_callback("Properties Not Found", "FLUMEN file does not contain LMKD or Chimera properties")
-                return None
-            properties_data["FLUMEN"] = flumen_properties
-            depot_paths["FLUMEN"] = flumen_depot_path
-        
-        if progress_callback:
-            progress_callback(80)
-        
-        # Compare properties if both files exist
-        if process_beni and process_flumen:
-            differences = compare_properties(properties_data["BENI"], properties_data["FLUMEN"])
+        result = _service().load_properties(
+            beni_depot_path,
+            flumen_depot_path,
+            "",
+            progress_callback=progress_callback,
+        )
+
+        if (
+            info_callback
+            and "BENI" in result.comparison_data
+            and "FLUMEN" in result.comparison_data
+        ):
+            differences = compare_properties(
+                result.comparison_data["BENI"],
+                result.comparison_data["FLUMEN"],
+            )
             if differences:
-                diff_message = "Properties differ between BENI and FLUMEN:\n\n" + "\n".join(differences)
-                if info_callback:
-                    info_callback("Properties Comparison", diff_message)
-        
-        # Return the properties from the first available file for editing
-        result_properties = properties_data.get("BENI", properties_data.get("FLUMEN", {}))
-        
-        # Add metadata for apply functionality
-        result_properties["_metadata"] = {
-            "depot_paths": depot_paths,
-            "original_properties": result_properties.copy()
-        }
-        
-        if progress_callback:
-            progress_callback(100)
-        
-        return result_properties
-        
-    except Exception as e:
+                diff_message = (
+                    "Properties differ between BENI and FLUMEN:\n\n"
+                    + "\n".join(differences)
+                )
+                info_callback("Properties Comparison", diff_message)
+
+        return result.merged_properties
+    except Exception as exc:
         if error_callback:
-            error_callback("Load Properties Error", str(e))
+            error_callback("Load Properties Error", str(exc))
         return None
 
-def apply_tuning_changes(current_properties, original_depot_paths, 
-                        log_callback, progress_callback=None, error_callback=None):
-    """Legacy function - apply changes to original depot paths"""
-    return apply_tuning_changes_enhanced_with_auto_resolve(current_properties, original_depot_paths, 
-                                                          log_callback, progress_callback, error_callback)
 
-# Utility functions
+def apply_tuning_changes(
+    current_properties,
+    original_depot_paths,
+    log_callback,
+    progress_callback=None,
+    error_callback=None,
+):
+    """Legacy function: apply changes to original depot paths."""
+    return apply_tuning_changes_enhanced_with_auto_resolve(
+        current_properties,
+        original_depot_paths,
+        log_callback,
+        progress_callback,
+        error_callback,
+    )
+
+
 def _legacy_extract_properties_from_file(file_path):
-    """Extract LMKD and Chimera properties from file"""
+    """Extract LMKD and Chimera properties from file."""
     return _extract_properties_from_file(file_path)
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        properties = {"LMKD": {}, "Chimera": {}}
-        
-        # Extract LMKD properties
-        lmkd_block = extract_block(lines, "# LMKD property", ["# Chimera property", "# DHA property"])
-        if not lmkd_block:
-            lmkd_block = extract_block(lines, "# DHA property", ["# Chimera property"])
-        
-        if lmkd_block:
-            lmkd_props = parse_properties_block(lmkd_block)
-            properties["LMKD"] = lmkd_props
-        
-        # Extract Chimera properties
-        chimera_block = extract_block(lines, "# Chimera property", ["# Nandswap", "#", ""])
-        if chimera_block:
-            chimera_props = parse_properties_block(chimera_block)
-            properties["Chimera"] = chimera_props
-        
-        # Return None if no properties found
-        if not properties["LMKD"] and not properties["Chimera"]:
-            return None
-        
-        return properties
-        
-    except Exception:
-        return None
 
 def extract_block(lines, start_header, next_header_list):
-    """Extract block of lines between headers"""
+    """Extract block of lines between headers."""
     start = end = None
     for idx, line in enumerate(lines):
         if line.strip() == start_header:
@@ -769,14 +198,28 @@ def extract_block(lines, start_header, next_header_list):
         end = len(lines)
     return lines[start:end]
 
+
 def parse_properties_block(block_lines):
-    """Parse property block and extract key-value pairs"""
+    """Parse property block and extract key-value pairs."""
     return _parse_properties_block(block_lines)
 
+
 def compare_properties(beni_props, flumen_props):
-    """Compare properties between BENI and FLUMEN files"""
-    return _compare_properties(beni_props, flumen_props, first_label="BENI", second_label="FLUMEN") or []
+    """Compare properties between BENI and FLUMEN files."""
+    return _compare_properties(
+        beni_props,
+        flumen_props,
+        first_label="BENI",
+        second_label="FLUMEN",
+    ) or []
+
 
 def compare_property_dict(dict1, dict2, category):
-    """Compare two property dictionaries"""
-    return _compare_property_dict(dict1, dict2, category, first_label="BENI", second_label="FLUMEN")
+    """Compare two property dictionaries."""
+    return _compare_property_dict(
+        dict1,
+        dict2,
+        category,
+        first_label="BENI",
+        second_label="FLUMEN",
+    )
